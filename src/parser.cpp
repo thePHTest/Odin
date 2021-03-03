@@ -90,7 +90,6 @@ Token ast_token(Ast *node) {
 	case Ast_TypeidType:       return node->TypeidType.token;
 	case Ast_HelperType:       return node->HelperType.token;
 	case Ast_DistinctType:     return node->DistinctType.token;
-	case Ast_OpaqueType:       return node->OpaqueType.token;
 	case Ast_PolyType:         return node->PolyType.token;
 	case Ast_ProcType:         return node->ProcType.token;
 	case Ast_RelativeType:     return ast_token(node->RelativeType.tag);
@@ -100,7 +99,6 @@ Token ast_token(Ast *node) {
 	case Ast_StructType:       return node->StructType.token;
 	case Ast_UnionType:        return node->UnionType.token;
 	case Ast_EnumType:         return node->EnumType.token;
-	case Ast_BitFieldType:     return node->BitFieldType.token;
 	case Ast_BitSetType:       return node->BitSetType.token;
 	case Ast_MapType:          return node->MapType.token;
 	}
@@ -381,9 +379,6 @@ Ast *clone_ast(Ast *node) {
 	case Ast_DistinctType:
 		n->DistinctType.type = clone_ast(n->DistinctType.type);
 		break;
-	case Ast_OpaqueType:
-		n->OpaqueType.type = clone_ast(n->OpaqueType.type);
-		break;
 	case Ast_ProcType:
 		n->ProcType.params  = clone_ast(n->ProcType.params);
 		n->ProcType.results = clone_ast(n->ProcType.results);
@@ -416,10 +411,6 @@ Ast *clone_ast(Ast *node) {
 	case Ast_EnumType:
 		n->EnumType.base_type = clone_ast(n->EnumType.base_type);
 		n->EnumType.fields    = clone_ast_array(n->EnumType.fields);
-		break;
-	case Ast_BitFieldType:
-		n->BitFieldType.fields = clone_ast_array(n->BitFieldType.fields);
-		n->BitFieldType.align = clone_ast(n->BitFieldType.align);
 		break;
 	case Ast_BitSetType:
 		n->BitSetType.elem       = clone_ast(n->BitSetType.elem);
@@ -957,12 +948,6 @@ Ast *ast_distinct_type(AstFile *f, Token token, Ast *type) {
 	return result;
 }
 
-Ast *ast_opaque_type(AstFile *f, Token token, Ast *type) {
-	Ast *result = alloc_ast_node(f, Ast_OpaqueType);
-	result->OpaqueType.token = token;
-	result->OpaqueType.type  = type;
-	return result;
-}
 
 Ast *ast_poly_type(AstFile *f, Token token, Ast *type, Ast *specialization) {
 	Ast *result = alloc_ast_node(f, Ast_PolyType);
@@ -1051,14 +1036,6 @@ Ast *ast_enum_type(AstFile *f, Token token, Ast *base_type, Array<Ast *> const &
 	result->EnumType.token = token;
 	result->EnumType.base_type = base_type;
 	result->EnumType.fields = slice_from_array(fields);
-	return result;
-}
-
-Ast *ast_bit_field_type(AstFile *f, Token token, Array<Ast *> const &fields, Ast *align) {
-	Ast *result = alloc_ast_node(f, Ast_BitFieldType);
-	result->BitFieldType.token = token;
-	result->BitFieldType.fields = slice_from_array(fields);
-	result->BitFieldType.align = align;
 	return result;
 }
 
@@ -1509,7 +1486,6 @@ bool is_semicolon_optional_for_node(AstFile *f, Ast *s) {
 	case Ast_StructType:
 	case Ast_UnionType:
 	case Ast_EnumType:
-	case Ast_BitFieldType:
 		// Require semicolon within a procedure body
 		return f->curr_proc == nullptr;
 	case Ast_ProcLit:
@@ -1865,6 +1841,47 @@ bool ast_on_same_line(Ast *x, Ast *y) {
 	return ast_on_same_line(ast_token(x), y);
 }
 
+Ast *parse_force_inlining_operand(AstFile *f, Token token) {
+	Ast *expr = parse_unary_expr(f, false);
+	Ast *e = unparen_expr(expr);
+	if (e->kind != Ast_ProcLit && e->kind != Ast_CallExpr) {
+		syntax_error(expr, "%.*s must be followed by a procedure literal or call, got %.*s", LIT(token.string), LIT(ast_strings[expr->kind]));
+		return ast_bad_expr(f, token, f->curr_token);
+	}
+	ProcInlining pi = ProcInlining_none;
+	if (token.kind == Token_inline) {
+		syntax_warning(token, "'inline' is deprecated in favour of '#force_inline'");
+		pi = ProcInlining_inline;
+	} else if (token.kind == Token_no_inline) {
+		syntax_warning(token, "'no_inline' is deprecated in favour of '#force_no_inline'");
+		pi = ProcInlining_no_inline;
+	} else if (token.kind == Token_Ident) {
+		if (token.string == "force_inline") {
+			pi = ProcInlining_inline;
+		} else if (token.string == "force_no_inline") {
+			pi = ProcInlining_no_inline;
+		}
+	}
+
+	if (pi != ProcInlining_none) {
+		if (e->kind == Ast_ProcLit) {
+			if (expr->ProcLit.inlining != ProcInlining_none &&
+			    expr->ProcLit.inlining != pi) {
+				syntax_error(expr, "You cannot apply both 'inline' and 'no_inline' to a procedure literal");
+			}
+			expr->ProcLit.inlining = pi;
+		} else if (e->kind == Ast_CallExpr) {
+			if (expr->CallExpr.inlining != ProcInlining_none &&
+			    expr->CallExpr.inlining != pi) {
+				syntax_error(expr, "You cannot apply both 'inline' and 'no_inline' to a procedure call");
+			}
+			expr->CallExpr.inlining = pi;
+		}
+	}
+
+	return expr;
+}
+
 
 Ast *parse_operand(AstFile *f, bool lhs) {
 	Ast *operand = nullptr; // Operand
@@ -1908,19 +1925,8 @@ Ast *parse_operand(AstFile *f, bool lhs) {
 		return ast_distinct_type(f, token, type);
 	}
 
-	case Token_opaque: {
-		Token token = expect_token(f, Token_opaque);
-		warning(token, "opaque is deprecated, please use #opaque");
-		Ast *type = parse_type(f);
-		return ast_opaque_type(f, token, type);
-	}
-
 	case Token_Hash: {
 		Token token = expect_token(f, Token_Hash);
-		if (allow_token(f, Token_opaque)) {
-			Ast *type = parse_type(f);
-			return ast_opaque_type(f, token, type);
-		}
 
 		Token name = expect_token(f, Token_Ident);
 		if (name.string == "type") {
@@ -1994,6 +2000,12 @@ Ast *parse_operand(AstFile *f, bool lhs) {
 			tag = parse_call_expr(f, tag);
 			Ast *type = parse_type(f);
 			return ast_relative_type(f, tag, type);
+		} else if (name.string == "opaque") {
+			syntax_warning(token, "'#opaque' has been removed and will do nothing to the applied type");
+			return parse_type(f);
+		} else if (name.string == "force_inline" ||
+		           name.string == "force_no_inline") {
+			return parse_force_inlining_operand(f, name);
 		} else {
 			operand = ast_tag_expr(f, token, name, parse_expr(f, false));
 		}
@@ -2004,35 +2016,7 @@ Ast *parse_operand(AstFile *f, bool lhs) {
 	case Token_no_inline:
 	{
 		Token token = advance_token(f);
-		Ast *expr = parse_unary_expr(f, false);
-		Ast *e = unparen_expr(expr);
-		if (e->kind != Ast_ProcLit && e->kind != Ast_CallExpr) {
-			syntax_error(expr, "%.*s must be followed by a procedure literal or call, got %.*s", LIT(token.string), LIT(ast_strings[expr->kind]));
-			return ast_bad_expr(f, token, f->curr_token);
-		}
-		ProcInlining pi = ProcInlining_none;
-		if (token.kind == Token_inline) {
-			pi = ProcInlining_inline;
-		} else if (token.kind == Token_no_inline) {
-			pi = ProcInlining_no_inline;
-		}
-		if (pi != ProcInlining_none) {
-			if (e->kind == Ast_ProcLit) {
-				if (expr->ProcLit.inlining != ProcInlining_none &&
-				    expr->ProcLit.inlining != pi) {
-					syntax_error(expr, "You cannot apply both 'inline' and 'no_inline' to a procedure literal");
-				}
-				expr->ProcLit.inlining = pi;
-			} else if (e->kind == Ast_CallExpr) {
-				if (expr->CallExpr.inlining != ProcInlining_none &&
-				    expr->CallExpr.inlining != pi) {
-					syntax_error(expr, "You cannot apply both 'inline' and 'no_inline' to a procedure call");
-				}
-				expr->CallExpr.inlining = pi;
-			}
-		}
-
-		return expr;
+		return parse_force_inlining_operand(f, token);
 	} break;
 
 	// Parse Procedure Type or Literal or Group
@@ -2055,29 +2039,6 @@ Ast *parse_operand(AstFile *f, bool lhs) {
 			}
 
 			Token close = expect_token(f, Token_CloseBrace);
-
-			if (args.count == 0) {
-				syntax_error(token, "Expected a least 1 argument in a procedure group");
-			}
-
-			return ast_proc_group(f, token, open, close, args);
-		} else if (f->curr_token.kind == Token_OpenBracket) { // ProcGroup
-			Token open = expect_token(f, Token_OpenBracket);
-			warning(open, "Procedure groups using [] are now deprecated, please use {} instead");
-
-			auto args = array_make<Ast *>(heap_allocator());
-
-			while (f->curr_token.kind != Token_CloseBracket &&
-			       f->curr_token.kind != Token_EOF) {
-				Ast *elem = parse_expr(f, false);
-				array_add(&args, elem);
-
-				if (!allow_token(f, Token_Comma)) {
-					break;
-				}
-			}
-
-			Token close = expect_token(f, Token_CloseBracket);
 
 			if (args.count == 0) {
 				syntax_error(token, "Expected a least 1 argument in a procedure group");
@@ -2386,51 +2347,6 @@ Ast *parse_operand(AstFile *f, bool lhs) {
 		return ast_enum_type(f, token, base_type, values);
 	} break;
 
-	case Token_bit_field: {
-		Token token = expect_token(f, Token_bit_field);
-		auto fields = array_make<Ast *>(heap_allocator());
-		Ast *align = nullptr;
-		Token open, close;
-
-		isize prev_level = f->expr_level;
-		f->expr_level = -1;
-
-		while (allow_token(f, Token_Hash)) {
-			Token tag = expect_token_after(f, Token_Ident, "#");
-			if (tag.string == "align") {
-				if (align) {
-					syntax_error(tag, "Duplicate bit_field tag '#%.*s'", LIT(tag.string));
-				}
-				align = parse_expr(f, true);
-			} else {
-				syntax_error(tag, "Invalid bit_field tag '#%.*s'", LIT(tag.string));
-			}
-		}
-
-		f->expr_level = prev_level;
-
-		open = expect_token_after(f, Token_OpenBrace, "bit_field");
-
-		while (f->curr_token.kind != Token_EOF &&
-		       f->curr_token.kind != Token_CloseBrace) {
-			Ast *name = parse_ident(f);
-			Token colon = expect_token(f, Token_Colon);
-			Ast *value = parse_expr(f, true);
-
-			Ast *field = ast_field_value(f, name, value, colon);
-			array_add(&fields, field);
-
-			if (f->curr_token.kind != Token_Comma) {
-				break;
-			}
-			advance_token(f);
-		}
-
-		close = expect_token(f, Token_CloseBrace);
-
-		return ast_bit_field_type(f, token, fields, align);
-	} break;
-
 	case Token_bit_set: {
 		Token token = expect_token(f, Token_bit_set);
 		expect_token(f, Token_OpenBracket);
@@ -2524,19 +2440,6 @@ Ast *parse_operand(AstFile *f, bool lhs) {
 		return ast_inline_asm_expr(f, token, open, close, param_types, return_type, asm_string, constraints_string, has_side_effects, is_align_stack, dialect);
 	}
 
-	default: {
-		#if 0
-		Ast *type = parse_type_or_ident(f);
-		if (type != nullptr) {
-			// TODO(bill): Is this correct???
-			// NOTE(bill): Sanity check as identifiers should be handled already
-			TokenPos pos = ast_token(type).pos;
-			GB_ASSERT_MSG(type->kind != Ast_Ident, "Type cannot be identifier %.*s(%td:%td)", LIT(pos.file), pos.line, pos.column);
-			return type;
-		}
-		#endif
-		break;
-	}
 	}
 
 	return nullptr;
@@ -2554,7 +2457,6 @@ bool is_literal_type(Ast *node) {
 	case Ast_EnumType:
 	case Ast_DynamicArrayType:
 	case Ast_MapType:
-	case Ast_BitFieldType:
 	case Ast_BitSetType:
 	case Ast_CallExpr:
 		return true;
@@ -2676,9 +2578,6 @@ Ast *parse_atom_expr(AstFile *f, Ast *operand, bool lhs) {
 		}
 
 		case Token_OpenBracket: {
-			if (lhs) {
-				// TODO(bill): Handle this
-			}
 			bool prev_allow_range = f->allow_range;
 			f->allow_range = false;
 
@@ -3226,8 +3125,6 @@ Ast *parse_results(AstFile *f, bool *diverging) {
 ProcCallingConvention string_to_calling_convention(String s) {
 	if (s == "odin")        return ProcCC_Odin;
 	if (s == "contextless") return ProcCC_Contextless;
-	if (s == "pure")        return ProcCC_Pure;
-	if (s == "pure_none")   return ProcCC_PureNone;
 	if (s == "cdecl")       return ProcCC_CDecl;
 	if (s == "c")           return ProcCC_CDecl;
 	if (s == "stdcall")     return ProcCC_StdCall;
@@ -4292,6 +4189,61 @@ Ast *parse_attribute(AstFile *f, Token token, TokenKind open_kind, TokenKind clo
 }
 
 
+Ast *parse_unrolled_for_loop(AstFile *f, Token inline_token) {
+	if (inline_token.kind == Token_inline) {
+		syntax_warning(inline_token, "'inline for' is deprecated in favour of `#unroll for'");
+	}
+	Token for_token = expect_token(f, Token_for);
+	Ast *val0 = nullptr;
+	Ast *val1 = nullptr;
+	Token in_token = {};
+	Ast *expr = nullptr;
+	Ast *body = nullptr;
+
+	bool bad_stmt = false;
+
+	if (f->curr_token.kind != Token_in) {
+		Array<Ast *> idents = parse_ident_list(f, false);
+		switch (idents.count) {
+		case 1:
+			val0 = idents[0];
+			break;
+		case 2:
+			val0 = idents[0];
+			val1 = idents[1];
+			break;
+		default:
+			syntax_error(for_token, "Expected either 1 or 2 identifiers");
+			bad_stmt = true;
+			break;
+		}
+	}
+	in_token = expect_token(f, Token_in);
+
+	bool prev_allow_range = f->allow_range;
+	isize prev_level = f->expr_level;
+	f->allow_range = true;
+	f->expr_level = -1;
+	expr = parse_expr(f, false);
+	f->expr_level = prev_level;
+	f->allow_range = prev_allow_range;
+
+	if (allow_token(f, Token_do)) {
+		body = convert_stmt_to_body(f, parse_stmt(f));
+		if (build_context.disallow_do) {
+			syntax_error(body, "'do' has been disallowed");
+		} else if (!ast_on_same_line(for_token, body)) {
+			syntax_error(body, "The body of a 'do' be on the same line as the 'for' token");
+		}
+	} else {
+		body = parse_block_stmt(f, false);
+	}
+	if (bad_stmt) {
+		return ast_bad_stmt(f, inline_token, f->curr_token);
+	}
+	return ast_inline_range_stmt(f, inline_token, for_token, val0, val1, in_token, expr, body);
+}
+
 Ast *parse_stmt(AstFile *f) {
 	Ast *s = nullptr;
 	Token token = f->curr_token;
@@ -4300,55 +4252,7 @@ Ast *parse_stmt(AstFile *f) {
 	case Token_inline:
 		if (peek_token_kind(f, Token_for)) {
 			Token inline_token = expect_token(f, Token_inline);
-			Token for_token = expect_token(f, Token_for);
-			Ast *val0 = nullptr;
-			Ast *val1 = nullptr;
-			Token in_token = {};
-			Ast *expr = nullptr;
-			Ast *body = nullptr;
-
-			bool bad_stmt = false;
-
-			if (f->curr_token.kind != Token_in) {
-				Array<Ast *> idents = parse_ident_list(f, false);
-				switch (idents.count) {
-				case 1:
-					val0 = idents[0];
-					break;
-				case 2:
-					val0 = idents[0];
-					val1 = idents[1];
-					break;
-				default:
-					syntax_error(for_token, "Expected either 1 or 2 identifiers");
-					bad_stmt = true;
-					break;
-				}
-			}
-			in_token = expect_token(f, Token_in);
-
-			bool prev_allow_range = f->allow_range;
-			isize prev_level = f->expr_level;
-			f->allow_range = true;
-			f->expr_level = -1;
-			expr = parse_expr(f, false);
-			f->expr_level = prev_level;
-			f->allow_range = prev_allow_range;
-
-			if (allow_token(f, Token_do)) {
-				body = convert_stmt_to_body(f, parse_stmt(f));
-				if (build_context.disallow_do) {
-					syntax_error(body, "'do' has been disallowed");
-				} else if (!ast_on_same_line(for_token, body)) {
-					syntax_error(body, "The body of a 'do' be on the same line as the 'for' token");
-				}
-			} else {
-				body = parse_block_stmt(f, false);
-			}
-			if (bad_stmt) {
-				return ast_bad_stmt(f, inline_token, f->curr_token);
-			}
-			return ast_inline_range_stmt(f, inline_token, for_token, val0, val1, in_token, expr, body);
+			return parse_unrolled_for_loop(f, inline_token);
 		}
 		/* fallthrough */
 	case Token_no_inline:
@@ -4494,6 +4398,12 @@ Ast *parse_stmt(AstFile *f) {
 		} else if (tag == "panic") {
 			Ast *t = ast_basic_directive(f, hash_token, tag);
 			return ast_expr_stmt(f, parse_call_expr(f, t));
+		} else if (name.string == "force_inline" ||
+		           name.string == "force_no_inline") {
+			Ast *expr = parse_force_inlining_operand(f, name);
+			return ast_expr_stmt(f, expr);
+		} else if (tag == "unroll") {
+			return parse_unrolled_for_loop(f, name);
 		} else if (tag == "include") {
 			syntax_error(token, "#include is not a valid import declaration kind. Did you mean 'import'?");
 			s = ast_bad_stmt(f, token, f->curr_token);
@@ -5270,6 +5180,8 @@ bool parse_file(Parser *p, AstFile *f) {
 						if (!parse_build_tag(tok, lc)) {
 							return false;
 						}
+					} else if (lc == "+private") {
+						f->is_private = true;
 					}
 				}
 			}
@@ -5320,6 +5232,7 @@ ParseFileError process_imported_file(Parser *p, ImportedFile const &imported_fil
 	TokenPos err_pos = {0};
 	ParseFileError err = init_ast_file(file, fi->fullpath, &err_pos);
 	err_pos.file = fi->fullpath;
+	file->last_error = err;
 
 	if (err != ParseFile_None) {
 		if (err == ParseFile_EmptyFile) {
@@ -5426,6 +5339,18 @@ ParseFileError parse_packages(Parser *p, String init_filename) {
 		}
 	}
 
+	for (isize i = p->packages.count-1; i >= 0; i--) {
+		AstPackage *pkg = p->packages[i];
+		for (isize j = pkg->files.count-1; j >= 0; j--) {
+			AstFile *file = pkg->files[j];
+			if (file->error_count != 0) {
+				if (file->last_error != ParseFile_None) {
+					return file->last_error;
+				}
+				return ParseFile_GeneralError;
+			}
+		}
+	}
 	return ParseFile_None;
 }
 

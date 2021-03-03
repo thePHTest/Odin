@@ -30,7 +30,7 @@ is_integer_negative :: proc(x: u64, is_signed: bool, bit_size: int) -> (u: u64, 
 		case 64:
 			i := i64(u);
 			neg = i < 0;
-			u = u64(abs(i64(i)));
+			u = u64(abs(i));
 		case:
 			panic("is_integer_negative: Unknown integer size");
 		}
@@ -58,7 +58,7 @@ append_bits :: proc(buf: []byte, x: u64, base: int, is_signed: bool, bit_size: i
 		switch base {
 		case  2: i-=1; a[i] = 'b';
 		case  8: i-=1; a[i] = 'o';
-		case 10: i-=1; a[i] = 'd';
+		// case 10: i-=1; a[i] = 'd';
 		case 12: i-=1; a[i] = 'z';
 		case 16: i-=1; a[i] = 'x';
 		case: ok = false;
@@ -105,7 +105,7 @@ is_integer_negative_128 :: proc(x: u128, is_signed: bool, bit_size: int) -> (u: 
 		case 128:
 			i := i128(u);
 			neg = i < 0;
-			u = u128(abs(i128(i)));
+			u = u128(abs(i));
 		case:
 			panic("is_integer_negative: Unknown integer size");
 		}

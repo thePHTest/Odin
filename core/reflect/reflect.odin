@@ -28,9 +28,7 @@ Type_Info_Struct           :: runtime.Type_Info_Struct;
 Type_Info_Union            :: runtime.Type_Info_Union;
 Type_Info_Enum             :: runtime.Type_Info_Enum;
 Type_Info_Map              :: runtime.Type_Info_Map;
-Type_Info_Bit_Field        :: runtime.Type_Info_Bit_Field;
 Type_Info_Bit_Set          :: runtime.Type_Info_Bit_Set;
-Type_Info_Opaque           :: runtime.Type_Info_Opaque;
 Type_Info_Simd_Vector      :: runtime.Type_Info_Simd_Vector;
 Type_Info_Relative_Pointer :: runtime.Type_Info_Relative_Pointer;
 Type_Info_Relative_Slice   :: runtime.Type_Info_Relative_Slice;
@@ -60,9 +58,7 @@ Type_Kind :: enum {
 	Union,
 	Enum,
 	Map,
-	Bit_Field,
 	Bit_Set,
-	Opaque,
 	Simd_Vector,
 	Relative_Pointer,
 	Relative_Slice,
@@ -94,9 +90,7 @@ type_kind :: proc(T: typeid) -> Type_Kind {
 		case Type_Info_Union:            return .Union;
 		case Type_Info_Enum:             return .Enum;
 		case Type_Info_Map:              return .Map;
-		case Type_Info_Bit_Field:        return .Bit_Field;
 		case Type_Info_Bit_Set:          return .Bit_Set;
-		case Type_Info_Opaque:           return .Opaque;
 		case Type_Info_Simd_Vector:      return .Simd_Vector;
 		case Type_Info_Relative_Pointer: return .Relative_Pointer;
 		case Type_Info_Relative_Slice:   return .Relative_Slice;
@@ -139,7 +133,6 @@ type_info_core :: proc(info: ^runtime.Type_Info) -> ^runtime.Type_Info {
 		#partial switch i in base.variant {
 		case Type_Info_Named:  base = i.base;
 		case Type_Info_Enum:   base = i.base;
-		case Type_Info_Opaque: base = i.elem;
 		case: break loop;
 		}
 	}
@@ -177,7 +170,6 @@ typeid_elem :: proc(id: typeid) -> typeid {
 		case 256: return f64;
 		}
 	case Type_Info_Pointer:          return v.elem.id;
-	case Type_Info_Opaque:           return v.elem.id;
 	case Type_Info_Array:            return v.elem.id;
 	case Type_Info_Enumerated_Array: return v.elem.id;
 	case Type_Info_Slice:            return v.elem.id;
@@ -209,7 +201,7 @@ as_bytes :: proc(v: any) -> []byte {
 	return nil;
 }
 
-any_data :: inline proc(v: any) -> (data: rawptr, id: typeid) {
+any_data :: #force_inline proc(v: any) -> (data: rawptr, id: typeid) {
 	return v.data, v.id;
 }
 
@@ -344,24 +336,29 @@ index :: proc(val: any, i: int, loc := #caller_location) -> any {
 
 
 
-
+// Struct_Tag represents the type of the string of a struct field
+//
+// Through convention, tags are the concatenation of optionally space separationed key:"value" pairs.
+// Each key is a non-empty string which contains no control characters other than space, quotes, and colon.
 Struct_Tag :: distinct string;
 
 Struct_Field :: struct {
-	name:   string,
-	type:   typeid,
-	tag:    Struct_Tag,
-	offset: uintptr,
+	name:     string,
+	type:     typeid,
+	tag:      Struct_Tag,
+	offset:   uintptr,
+	is_using: bool,
 }
 
 struct_field_at :: proc(T: typeid, i: int) -> (field: Struct_Field) {
 	ti := runtime.type_info_base(type_info_of(T));
 	if s, ok := ti.variant.(runtime.Type_Info_Struct); ok {
 		if 0 <= i && i < len(s.names) {
-			field.name   = s.names[i];
-			field.type   = s.types[i].id;
-			field.tag    = Struct_Tag(s.tags[i]);
-			field.offset = s.offsets[i];
+			field.name     = s.names[i];
+			field.type     = s.types[i].id;
+			field.tag      = Struct_Tag(s.tags[i]);
+			field.offset   = s.offsets[i];
+			field.is_using = s.usings[i];
 		}
 	}
 	return;
@@ -372,10 +369,11 @@ struct_field_by_name :: proc(T: typeid, name: string) -> (field: Struct_Field) {
 	if s, ok := ti.variant.(runtime.Type_Info_Struct); ok {
 		for fname, i in s.names {
 			if fname == name {
-				field.name   = s.names[i];
-				field.type   = s.types[i].id;
-				field.tag    = Struct_Tag(s.tags[i]);
-				field.offset = s.offsets[i];
+				field.name     = s.names[i];
+				field.type     = s.types[i].id;
+				field.tag      = Struct_Tag(s.tags[i]);
+				field.offset   = s.offsets[i];
+				field.is_using = s.usings[i];
 				break;
 			}
 		}
@@ -531,22 +529,40 @@ enum_string :: proc(a: any) -> string {
 
 // Given a enum type and a value name, get the enum value.
 enum_from_name :: proc($EnumType: typeid, name: string) -> (value: EnumType, ok: bool) {
-    ti := type_info_base(type_info_of(EnumType));
-    if eti, eti_ok := ti.variant.(runtime.Type_Info_Enum); eti_ok {
-        for value_name, i in eti.names {
-            if value_name != name {
-            	continue;
-            }
-            v := eti.values[i];
-            value = EnumType(v);
-            ok = true;
-            return;
-        }
-    } else {
-        panic("expected enum type to reflect.enum_from_name");
-    }
-    return;
+	ti := type_info_base(type_info_of(EnumType));
+	if eti, eti_ok := ti.variant.(runtime.Type_Info_Enum); eti_ok {
+		for value_name, i in eti.names {
+			if value_name != name {
+				continue;
+			}
+			v := eti.values[i];
+			value = EnumType(v);
+			ok = true;
+			return;
+		}
+	} else {
+		panic("expected enum type to reflect.enum_from_name");
+	}
+	return;
 }
+
+enum_from_name_any :: proc(EnumType: typeid, name: string) -> (value: runtime.Type_Info_Enum_Value, ok: bool) {
+	ti := runtime.type_info_base(type_info_of(EnumType));
+	if eti, eti_ok := ti.variant.(runtime.Type_Info_Enum); eti_ok {
+		for value_name, i in eti.names {
+			if value_name != name {
+				continue;
+			}
+			value = eti.values[i];
+			ok = true;
+			return;
+		}
+	} else {
+		panic("expected enum type to reflect.enum_from_name_any");
+	}
+	return;
+}
+
 
 union_variant_type_info :: proc(a: any) -> ^runtime.Type_Info {
 	id := union_variant_typeid(a);
@@ -581,7 +597,7 @@ union_variant_typeid :: proc(a: any) -> typeid {
 		case u32:  tag = i64(i);
 		case i32:  tag = i64(i);
 		case u64:  tag = i64(i);
-		case i64:  tag = i64(i);
+		case i64:  tag = i;
 		case: unimplemented();
 		}
 
@@ -617,7 +633,7 @@ get_union_variant_raw_tag :: proc(a: any) -> i64 {
 		case u32:  tag = i64(i);
 		case i32:  tag = i64(i);
 		case u64:  tag = i64(i);
-		case i64:  tag = i64(i);
+		case i64:  tag = i;
 		case: unimplemented();
 		}
 
@@ -648,7 +664,7 @@ set_union_variant_raw_tag :: proc(a: any, tag: i64) {
 		case u32:  i = u32(tag);
 		case i32:  i = i32(tag);
 		case u64:  i = u64(tag);
-		case i64:  i = i64(tag);
+		case i64:  i = tag;
 		case: unimplemented();
 		}
 
@@ -728,7 +744,7 @@ as_bool :: proc(a: any) -> (value: bool, valid: bool) {
 	case Type_Info_Boolean:
 		valid = true;
 		switch v in a {
-		case bool: value = bool(v);
+		case bool: value = v;
 		case b8:   value = bool(v);
 		case b16:  value = bool(v);
 		case b32:  value = bool(v);
@@ -767,7 +783,7 @@ as_i64 :: proc(a: any) -> (value: i64, valid: bool) {
 		case i8:      value = i64(v);
 		case i16:     value = i64(v);
 		case i32:     value = i64(v);
-		case i64:     value = i64(v);
+		case i64:     value =      v;
 		case i128:    value = i64(v);
 		case int:     value = i64(v);
 
@@ -809,23 +825,23 @@ as_i64 :: proc(a: any) -> (value: i64, valid: bool) {
 	case Type_Info_Float:
 		valid = true;
 		switch v in a {
-		case f32:   value = i64(f32(v));
-		case f64:   value = i64(f64(v));
-		case f32le: value = i64(f32(v));
-		case f64le: value = i64(f64(v));
-		case f32be: value = i64(f32(v));
-		case f64be: value = i64(f64(v));
+		case f32:   value = i64(v);
+		case f64:   value = i64(v);
+		case f32le: value = i64(v);
+		case f64le: value = i64(v);
+		case f32be: value = i64(v);
+		case f64be: value = i64(v);
 		case: valid = false;
 		}
 
 	case Type_Info_Boolean:
 		valid = true;
 		switch v in a {
-		case bool: value = i64(bool(v));
-		case b8:   value = i64(bool(v));
-		case b16:  value = i64(bool(v));
-		case b32:  value = i64(bool(v));
-		case b64:  value = i64(bool(v));
+		case bool: value = i64(v);
+		case b8:   value = i64(v);
+		case b16:  value = i64(v);
+		case b32:  value = i64(v);
+		case b64:  value = i64(v);
 		case: valid = false;
 		}
 
@@ -881,7 +897,7 @@ as_u64 :: proc(a: any) -> (value: u64, valid: bool) {
 		case u8:     value = u64(v);
 		case u16:    value = u64(v);
 		case u32:    value = u64(v);
-		case u64:    value = u64(v);
+		case u64:    value =    (v);
 		case u128:   value = u64(v);
 		case uint:   value = u64(v);
 		case uintptr:value = u64(v);
@@ -916,23 +932,23 @@ as_u64 :: proc(a: any) -> (value: u64, valid: bool) {
 	case Type_Info_Float:
 		valid = true;
 		switch v in a {
-		case f32:   value = u64(f32(v));
-		case f64:   value = u64(f64(v));
-		case f32le: value = u64(f32(v));
-		case f64le: value = u64(f64(v));
-		case f32be: value = u64(f32(v));
-		case f64be: value = u64(f64(v));
+		case f32:   value = u64(v);
+		case f64:   value = u64(v);
+		case f32le: value = u64(v);
+		case f64le: value = u64(v);
+		case f32be: value = u64(v);
+		case f64be: value = u64(v);
 		case: valid = false;
 		}
 
 	case Type_Info_Boolean:
 		valid = true;
 		switch v in a {
-		case bool: value = u64(bool(v));
-		case b8:   value = u64(bool(v));
-		case b16:  value = u64(bool(v));
-		case b32:  value = u64(bool(v));
-		case b64:  value = u64(bool(v));
+		case bool: value = u64(v);
+		case b8:   value = u64(v);
+		case b16:  value = u64(v);
+		case b32:  value = u64(v);
+		case b64:  value = u64(v);
 		case: valid = false;
 		}
 
@@ -1021,23 +1037,23 @@ as_f64 :: proc(a: any) -> (value: f64, valid: bool) {
 	case Type_Info_Float:
 		valid = true;
 		switch v in a {
-		case f32:   value = f64(f32(v));
-		case f64:   value = f64(f64(v));
-		case f32le: value = f64(f32(v));
-		case f64le: value = f64(f64(v));
-		case f32be: value = f64(f32(v));
-		case f64be: value = f64(f64(v));
+		case f32:   value = f64(v);
+		case f64:   value =    (v);
+		case f32le: value = f64(v);
+		case f64le: value = f64(v);
+		case f32be: value = f64(v);
+		case f64be: value = f64(v);
 		case: valid = false;
 		}
 
 	case Type_Info_Boolean:
 		valid = true;
 		switch v in a {
-		case bool: value = f64(i32(bool(v)));
-		case b8:   value = f64(i32(bool(v)));
-		case b16:  value = f64(i32(bool(v)));
-		case b32:  value = f64(i32(bool(v)));
-		case b64:  value = f64(i32(bool(v)));
+		case bool: value = f64(i32(v));
+		case b8:   value = f64(i32(v));
+		case b16:  value = f64(i32(v));
+		case b32:  value = f64(i32(v));
+		case b64:  value = f64(i32(v));
 		case: valid = false;
 		}
 
@@ -1050,7 +1066,7 @@ as_f64 :: proc(a: any) -> (value: f64, valid: bool) {
 			}
 		case complex128:
 			if imag(v) == 0 {
-				value = f64(real(v));
+				value = real(v);
 				valid = true;
 			}
 		}
@@ -1064,7 +1080,7 @@ as_f64 :: proc(a: any) -> (value: f64, valid: bool) {
 			}
 		case quaternion256:
 			if imag(v) == 0 && jmag(v) == 0 && kmag(v) == 0 {
-				value = f64(real(v));
+				value = real(v);
 				valid = true;
 			}
 		}
@@ -1084,7 +1100,7 @@ as_string :: proc(a: any) -> (value: string, valid: bool) {
 	case Type_Info_String:
 		valid = true;
 		switch v in a {
-		case string:  value = string(v);
+		case string:  value = v;
 		case cstring: value = string(v);
 		case: valid = false;
 		}

@@ -28,6 +28,14 @@ gb_global Timings global_timings = {0};
 
 #if defined(LLVM_BACKEND_SUPPORT)
 #include "llvm_backend.cpp"
+
+#if defined(GB_SYSTEM_OSX)
+	#include <llvm/Config/llvm-config.h>
+	#if LLVM_VERSION_MAJOR < 11
+	#error LLVM Version 11+ is required => "brew install llvm@11"
+	#endif
+#endif
+
 #endif
 
 #include "ir.cpp"
@@ -431,7 +439,11 @@ void linker_stage(lbGenerator *gen) {
 				// This sets a requirement of Mountain Lion and up, but the compiler doesn't work without this limit.
 				// NOTE: If you change this (although this minimum is as low as you can go with Odin working)
 				//       make sure to also change the 'mtriple' param passed to 'opt'
+				#if defined(GB_CPU_ARM)
+				" -macosx_version_min 11.0.0 "
+				#else
 				" -macosx_version_min 10.8.0 "
+				#endif
 				// This points the linker to where the entry point is
 				" -e _main "
 			#endif
@@ -581,6 +593,7 @@ enum BuildFlagKind {
 	BuildFlag_NoEntryPoint,
 	BuildFlag_UseLLD,
 	BuildFlag_Vet,
+	BuildFlag_VetExtra,
 	BuildFlag_UseLLVMApi,
 	BuildFlag_IgnoreUnknownAttributes,
 	BuildFlag_ExtraLinkerFlags,
@@ -596,6 +609,9 @@ enum BuildFlagKind {
 
 	BuildFlag_Short,
 	BuildFlag_AllPackages,
+
+	BuildFlag_IgnoreWarnings,
+	BuildFlag_WarningsAsErrors,
 
 #if defined(GB_SYSTEM_WINDOWS)
 	BuildFlag_IgnoreVsSearch,
@@ -691,6 +707,7 @@ bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_NoEntryPoint,      str_lit("no-entry-point"),      BuildFlagParam_None, Command__does_check &~ Command_test);
 	add_flag(&build_flags, BuildFlag_UseLLD,            str_lit("lld"),                 BuildFlagParam_None, Command__does_build);
 	add_flag(&build_flags, BuildFlag_Vet,               str_lit("vet"),                 BuildFlagParam_None, Command__does_check);
+	add_flag(&build_flags, BuildFlag_VetExtra,          str_lit("vet-extra"),           BuildFlagParam_None, Command__does_check);
 	add_flag(&build_flags, BuildFlag_UseLLVMApi,        str_lit("llvm-api"),            BuildFlagParam_None, Command__does_build);
 	add_flag(&build_flags, BuildFlag_IgnoreUnknownAttributes, str_lit("ignore-unknown-attributes"), BuildFlagParam_None, Command__does_check);
 	add_flag(&build_flags, BuildFlag_ExtraLinkerFlags,  str_lit("extra-linker-flags"),              BuildFlagParam_String, Command__does_build);
@@ -706,7 +723,8 @@ bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_Short,         str_lit("short"),        BuildFlagParam_None, Command_doc);
 	add_flag(&build_flags, BuildFlag_AllPackages,   str_lit("all-packages"), BuildFlagParam_None, Command_doc);
 
-
+	add_flag(&build_flags, BuildFlag_IgnoreWarnings,   str_lit("ignore-warnings"),    BuildFlagParam_None, Command_all);
+	add_flag(&build_flags, BuildFlag_WarningsAsErrors, str_lit("warnings-as-errors"), BuildFlagParam_None, Command_all);
 
 #if defined(GB_SYSTEM_WINDOWS)
 	add_flag(&build_flags, BuildFlag_IgnoreVsSearch, str_lit("ignore-vs-search"),  BuildFlagParam_None, Command__does_build);
@@ -1135,6 +1153,10 @@ bool parse_build_flags(Array<String> args) {
 						case BuildFlag_Vet:
 							build_context.vet = true;
 							break;
+						case BuildFlag_VetExtra:
+							build_context.vet = true;
+							build_context.vet_extra = true;
+							break;
 
 						case BuildFlag_UseLLVMApi:
 							build_context.use_llvm_api = true;
@@ -1205,8 +1227,22 @@ bool parse_build_flags(Array<String> args) {
 						case BuildFlag_AllPackages:
 							build_context.cmd_doc_flags |= CmdDocFlag_AllPackages;
 							break;
-
-
+						case BuildFlag_IgnoreWarnings:
+							if (build_context.warnings_as_errors) {
+								gb_printf_err("-ignore-warnings cannot be used with -warnings-as-errors\n");
+								bad_flags = true;
+							} else {
+								build_context.ignore_warnings = true;
+							}
+							break;
+						case BuildFlag_WarningsAsErrors:
+							if (build_context.ignore_warnings) {
+								gb_printf_err("-warnings-as-errors cannot be used with -ignore-warnings\n");
+								bad_flags = true;
+							} else {
+								build_context.warnings_as_errors = true;
+							}
+							break;
 
 					#if defined(GB_SYSTEM_WINDOWS)
 						case BuildFlag_IgnoreVsSearch:
@@ -1664,10 +1700,21 @@ void print_show_help(String const arg0, String const &command) {
 		print_usage_line(3, "Unused declarations");
 		print_usage_line(0, "");
 
+		print_usage_line(1, "-vet-extra");
+		print_usage_line(2, "Do even more checks than standard vet on the code");
+		print_usage_line(2, "To treat the extra warnings as errors, use -warnings-as-errors");
+		print_usage_line(0, "");
+
 		print_usage_line(1, "-ignore-unknown-attributes");
 		print_usage_line(2, "Ignores unknown attributes");
 		print_usage_line(2, "This can be used with metaprogramming tools");
 		print_usage_line(0, "");
+
+		if (command != "test") {
+			print_usage_line(1, "-no-entry-point");
+			print_usage_line(2, "Removes default requirement of an entry point (e.g. main procedure)");
+			print_usage_line(0, "");
+		}
 	}
 
 	if (run_or_build) {
@@ -1690,6 +1737,14 @@ void print_show_help(String const arg0, String const &command) {
 
 		print_usage_line(1, "-default-to-nil-allocator");
 		print_usage_line(2, "Sets the default allocator to be the nil_allocator, an allocator which does nothing");
+		print_usage_line(0, "");
+
+		print_usage_line(1, "-ignore-warnings");
+		print_usage_line(2, "Ignores warning messages");
+		print_usage_line(0, "");
+
+		print_usage_line(1, "-warnings-as-errors");
+		print_usage_line(2, "Treats warning messages as error messages");
 		print_usage_line(0, "");
 	}
 
@@ -1797,6 +1852,13 @@ void print_show_unused(Checker *c) {
 	}
 	print_usage_line(0, "");
 }
+
+void enforce_platform_settings(void) {
+#if defined(GB_SYSTEM_OSX) && defined(GB_CPU_ARM)
+	build_context.use_llvm_api = true;
+#endif
+}
+
 
 int main(int arg_count, char const **arg_ptr) {
 	if (arg_count < 2) {
@@ -1951,7 +2013,7 @@ int main(int arg_count, char const **arg_ptr) {
 		return 0;
 	}
 
-
+	enforce_platform_settings();
 
 	// NOTE(bill): add 'shared' directory if it is not already set
 	if (!find_library_collection_path(str_lit("shared"), nullptr)) {
@@ -1993,6 +2055,10 @@ int main(int arg_count, char const **arg_ptr) {
 		return 1;
 	}
 
+	if (any_errors()) {
+		return 1;
+	}
+
 	temp_allocator_free_all(&temporary_allocator_data);
 
 	timings_start_section(timings, str_lit("type check"));
@@ -2006,6 +2072,9 @@ int main(int arg_count, char const **arg_ptr) {
 
 	if (checked_inited) {
 		check_parsed_files(&checker);
+	}
+	if (any_errors()) {
+		return 1;
 	}
 
 	temp_allocator_free_all(&temporary_allocator_data);
@@ -2158,7 +2227,7 @@ int main(int arg_count, char const **arg_ptr) {
 
 		if (build_context.cross_compiling && selected_target_metrics->metrics == &target_essence_amd64) {
 	#ifdef GB_SYSTEM_UNIX
-			system_exec_command_line_app("linker", "x86_64-essence-gcc \"%.*s.o\" -o \"%.*s\" %.*s %.*s", // -ffreestanding -nostdlib
+			system_exec_command_line_app("linker", "x86_64-essence-gcc -ffreestanding -nostdlib \"%.*s.o\" -o \"%.*s\" %.*s %.*s",
 					LIT(output_base), LIT(output_base), LIT(build_context.link_flags), LIT(build_context.extra_linker_flags));
 	#else
 			gb_printf_err("Linking for cross compilation for this platform is not yet supported (%.*s %.*s)\n",
@@ -2381,7 +2450,8 @@ int main(int arg_count, char const **arg_ptr) {
 				// so use ld instead.
 				// :UseLDForShared
 				linker = "ld";
-				link_settings = gb_string_appendc(link_settings, "-init '__$startup_runtime' ");
+				// NOTE(tetra, 2021-02-24): On Darwin, the symbol has _3_ underscores; on Linux, it only has 2.
+				link_settings = gb_string_append_fmt(link_settings, "-init '%s$startup_runtime' ", build_context.metrics.os == TargetOs_darwin ? "___" : "__");
 				// Shared libraries are .dylib on MacOS and .so on Linux.
 				#if defined(GB_SYSTEM_OSX)
 					output_ext = STR_LIT(".dylib");

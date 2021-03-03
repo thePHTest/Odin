@@ -22,9 +22,7 @@ Proc_Calling_Convention :: enum i32 {
 	C_Decl,
 	Std_Call,
 	Fast_Call,
-	Pure,
 	None,
-	Pure_None,
 
 	Foreign_Block_Default = -1,
 }
@@ -632,11 +630,6 @@ Distinct_Type :: struct {
 	type: ^Expr,
 }
 
-Opaque_Type :: struct {
-	using node: Expr,
-	type: ^Expr,
-}
-
 Poly_Type :: struct {
 	using node: Expr,
 	dollar:         tokenizer.Pos,
@@ -713,15 +706,6 @@ Enum_Type :: struct {
 	close:     tokenizer.Pos,
 
 	is_using:  bool,
-}
-
-Bit_Field_Type :: struct {
-	using node: Expr,
-	tok_pos: tokenizer.Pos,
-	align:   ^Expr,
-	open:    tokenizer.Pos,
-	fields:  []^Field_Value, // Field_Value with ':' rather than '='
-	close:   tokenizer.Pos,
 }
 
 Bit_Set_Type :: struct {

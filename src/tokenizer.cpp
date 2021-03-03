@@ -102,7 +102,6 @@ TOKEN_KIND(Token__KeywordBegin, ""), \
 	TOKEN_KIND(Token_struct,      "struct"),      \
 	TOKEN_KIND(Token_union,       "union"),       \
 	TOKEN_KIND(Token_enum,        "enum"),        \
-	TOKEN_KIND(Token_bit_field,   "bit_field"),   \
 	TOKEN_KIND(Token_bit_set,     "bit_set"),     \
 	TOKEN_KIND(Token_map,         "map"),         \
 	TOKEN_KIND(Token_dynamic,     "dynamic"),     \
@@ -110,7 +109,6 @@ TOKEN_KIND(Token__KeywordBegin, ""), \
 	TOKEN_KIND(Token_cast,        "cast"),        \
 	TOKEN_KIND(Token_transmute,   "transmute"),   \
 	TOKEN_KIND(Token_distinct,    "distinct"),    \
-	TOKEN_KIND(Token_opaque,      "opaque"),      \
 	TOKEN_KIND(Token_using,       "using"),       \
 	TOKEN_KIND(Token_inline,      "inline"),      \
 	TOKEN_KIND(Token_no_inline,   "no_inline"),   \
@@ -250,6 +248,10 @@ gb_global ErrorCollector global_error_collector;
 #define MAX_ERROR_COLLECTOR_COUNT (36)
 
 
+bool any_errors(void) {
+	return global_error_collector.error_buffer.count > 0;
+}
+
 void init_global_error_collector(void) {
 	gb_mutex_init(&global_error_collector.mutex);
 	array_init(&global_error_collector.errors, heap_allocator());
@@ -313,27 +315,15 @@ ERROR_OUT_PROC(default_error_out_va) {
 
 ErrorOutProc *error_out_va = default_error_out_va;
 
+// NOTE: defined in build_settings.cpp
+bool global_warnings_as_errors(void);
+bool global_ignore_warnings(void);
+
 void error_out(char const *fmt, ...) {
 	va_list va;
 	va_start(va, fmt);
 	error_out_va(fmt, va);
 	va_end(va);
-}
-
-void warning_va(Token token, char const *fmt, va_list va) {
-	gb_mutex_lock(&global_error_collector.mutex);
-	global_error_collector.warning_count++;
-	// NOTE(bill): Duplicate error, skip it
-	if (token.pos.line == 0) {
-		error_out("Warning: %s\n", gb_bprintf_va(fmt, va));
-	} else if (global_error_collector.prev != token.pos) {
-		global_error_collector.prev = token.pos;
-		error_out("%.*s(%td:%td) Warning: %s\n",
-		          LIT(token.pos.file), token.pos.line, token.pos.column,
-		          gb_bprintf_va(fmt, va));
-	}
-
-	gb_mutex_unlock(&global_error_collector.mutex);
 }
 
 
@@ -354,6 +344,28 @@ void error_va(Token token, char const *fmt, va_list va) {
 		gb_exit(1);
 	}
 }
+
+void warning_va(Token token, char const *fmt, va_list va) {
+	if (global_warnings_as_errors()) {
+		error_va(token, fmt, va);
+		return;
+	}
+	gb_mutex_lock(&global_error_collector.mutex);
+	global_error_collector.warning_count++;
+	if (!global_ignore_warnings()) {
+		// NOTE(bill): Duplicate error, skip it
+		if (token.pos.line == 0) {
+			error_out("Warning: %s\n", gb_bprintf_va(fmt, va));
+		} else if (global_error_collector.prev != token.pos) {
+			global_error_collector.prev = token.pos;
+			error_out("%.*s(%td:%td) Warning: %s\n",
+			          LIT(token.pos.file), token.pos.line, token.pos.column,
+			          gb_bprintf_va(fmt, va));
+		}
+	}
+	gb_mutex_unlock(&global_error_collector.mutex);
+}
+
 
 void error_line_va(char const *fmt, va_list va) {
 	gb_mutex_lock(&global_error_collector.mutex);
@@ -400,18 +412,23 @@ void syntax_error_va(Token token, char const *fmt, va_list va) {
 }
 
 void syntax_warning_va(Token token, char const *fmt, va_list va) {
+	if (global_warnings_as_errors()) {
+		syntax_error_va(token, fmt, va);
+		return;
+	}
 	gb_mutex_lock(&global_error_collector.mutex);
 	global_error_collector.warning_count++;
-	// NOTE(bill): Duplicate error, skip it
-	if (global_error_collector.prev != token.pos) {
-		global_error_collector.prev = token.pos;
-		error_out("%.*s(%td:%td) Syntax Warning: %s\n",
-		          LIT(token.pos.file), token.pos.line, token.pos.column,
-		          gb_bprintf_va(fmt, va));
-	} else if (token.pos.line == 0) {
-		error_out("Warning: %s\n", gb_bprintf_va(fmt, va));
+	if (!global_ignore_warnings()) {
+		// NOTE(bill): Duplicate error, skip it
+		if (global_error_collector.prev != token.pos) {
+			global_error_collector.prev = token.pos;
+			error_out("%.*s(%td:%td) Syntax Warning: %s\n",
+			          LIT(token.pos.file), token.pos.line, token.pos.column,
+			          gb_bprintf_va(fmt, va));
+		} else if (token.pos.line == 0) {
+			error_out("Warning: %s\n", gb_bprintf_va(fmt, va));
+		}
 	}
-
 	gb_mutex_unlock(&global_error_collector.mutex);
 }
 

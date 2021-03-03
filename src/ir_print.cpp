@@ -635,15 +635,6 @@ void ir_print_type(irFileBuffer *f, irModule *m, Type *t, bool in_struct) {
 		ir_print_type(f, m, t->Map.internal_type);
 		break;
 
-	case Type_BitField: {
-		i64 align = type_align_of(t);
-		i64 size  = type_size_of(t);
-		ir_write_string(f, str_lit("<{"));
-		ir_print_alignment_prefix_hack(f, align);
-		ir_fprintf(f, ", [%lld x i8]}>", size);
-		break;
-	}
-
 	case Type_BitSet: {
 		i64 size = type_size_of(t);
 		if (size == 0) {
@@ -653,10 +644,6 @@ void ir_print_type(irFileBuffer *f, irModule *m, Type *t, bool in_struct) {
 		ir_print_type(f, m, bit_set_to_int(t));
 		return;
 	}
-
-	case Type_Opaque:
-		ir_print_type(f, m, strip_opaque_type(t));
-		return;
 
 	case Type_SimdVector:
 		if (t->SimdVector.is_x86_mmx) {
@@ -1460,13 +1447,11 @@ void ir_print_calling_convention(irFileBuffer *f, irModule *m, ProcCallingConven
 	switch (cc) {
 	case ProcCC_Odin:        ir_write_str_lit(f, "");       break;
 	case ProcCC_Contextless: ir_write_str_lit(f, "");       break;
-	case ProcCC_Pure:        ir_write_str_lit(f, "");       break;
 	// case ProcCC_CDecl:       ir_write_str_lit(f, "ccc ");   break;
 	case ProcCC_CDecl:       ir_write_str_lit(f, "");   break;
 	case ProcCC_StdCall:     ir_write_str_lit(f, "cc 64 "); break;
 	case ProcCC_FastCall:    ir_write_str_lit(f, "cc 65 "); break;
 	case ProcCC_None:        ir_write_str_lit(f, "");       break;
-	case ProcCC_PureNone:    ir_write_str_lit(f, "");       break;
 	default: GB_PANIC("unknown calling convention: %d", cc);
 	}
 }
@@ -2310,7 +2295,7 @@ void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
 					ir_print_type(f, m, t);
 					ir_write_byte(f, ' ');
 					ir_print_value(f, m, arg, t);
-					param_index++;
+					arg_index++;
 				}
 			} else {
 				// GB_ASSERT(call->args.count == params->variables.count);
@@ -2641,7 +2626,6 @@ bool ir_print_global_type_allowed(Type *t) {
 	case Type_DynamicArray:
 	case Type_Map:
 	case Type_Union:
-	case Type_BitField:
 		return false;
 	}
 

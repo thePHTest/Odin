@@ -226,7 +226,9 @@ wprint :: proc(w: io.Writer, args: ..any, sep := " ") -> int {
 		fmt_value(&fi, args[i], 'v');
 	}
 	io.flush(auto_cast w);
-	return int(io.size(auto_cast w) - size0);
+
+	size1 := io.size(auto_cast w);
+	return int(size1 - size0);
 }
 
 wprintln :: proc(w: io.Writer, args: ..any, sep := " ") -> int {
@@ -244,7 +246,9 @@ wprintln :: proc(w: io.Writer, args: ..any, sep := " ") -> int {
 	}
 	io.write_byte(fi.writer, '\n');
 	io.flush(auto_cast w);
-	return int(io.size(auto_cast w) - size0);
+
+	size1 := io.size(auto_cast w);
+	return int(size1 - size0);
 }
 
 wprintf :: proc(w: io.Writer, fmt: string, args: ..any) -> int {
@@ -521,7 +525,9 @@ wprintf :: proc(w: io.Writer, fmt: string, args: ..any) -> int {
 	}
 
 	io.flush(auto_cast w);
-	return int(io.size(auto_cast w) - size0);
+
+	size1 := io.size(auto_cast w);
+	return int(size1 - size0);
 }
 
 wprint_type :: proc(w: io.Writer, info: ^runtime.Type_Info) -> int {
@@ -539,7 +545,7 @@ wprint_typeid :: proc(w: io.Writer, id: typeid) -> int {
 
 
 _parse_int :: proc(s: string, offset: int) -> (result: int, new_offset: int, ok: bool) {
-	is_digit :: inline proc(r: byte) -> bool { return '0' <= r && r <= '9' }
+	is_digit :: #force_inline proc(r: byte) -> bool { return '0' <= r && r <= '9' }
 
 	new_offset = offset;
 	for new_offset <= len(s) {
@@ -691,7 +697,7 @@ _fmt_int :: proc(fi: ^Info, u: u64, base: int, is_signed: bool, bit_size: int, d
 	if fi.space            { flags |= {.Space};  }
 	s := strconv.append_bits(buf[start:], u, base, is_signed, bit_size, digits, flags);
 
-	if fi.hash && fi.zero {
+	if fi.hash && fi.zero && fi.indent == 0 {
 		c: byte = 0;
 		switch base {
 		case 2:  c = 'b';
@@ -757,7 +763,7 @@ _fmt_int_128 :: proc(fi: ^Info, u: u128, base: int, is_signed: bool, bit_size: i
 	if fi.space            { flags |= {.Space};  }
 	s := strconv.append_bits_128(buf[start:], u, base, is_signed, bit_size, digits, flags);
 
-	if fi.hash && fi.zero {
+	if fi.hash && fi.zero && fi.indent == 0 {
 		c: byte = 0;
 		switch base {
 		case 2:  c = 'b';
@@ -1163,7 +1169,7 @@ fmt_bit_set :: proc(fi: ^Info, v: any, name: string = "") {
 		case 128:
 			x := (^u128)(v.data)^;
 			if do_byte_swap { x = byte_swap(x); }
-			bits = u128(x);
+			bits = x;
 		case: panic("unknown bit_size size");
 		}
 
@@ -1204,90 +1210,40 @@ fmt_bit_set :: proc(fi: ^Info, v: any, name: string = "") {
 		}
 	}
 }
-fmt_bit_field :: proc(fi: ^Info, v: any, bit_field_name: string = "") {
-	type_info := type_info_of(v.id);
-	#partial switch info in type_info.variant {
-	case runtime.Type_Info_Named:
-		val := v;
-		val.id = info.base.id;
-		fmt_bit_field(fi, val, info.name);
-	case runtime.Type_Info_Bit_Field:
-		data: u64 = 0;
-		switch type_info.size {
-		case 1: data = cast(u64) (^u8)(v.data)^;
-		case 2: data = cast(u64)(^u16)(v.data)^;
-		case 4: data = cast(u64)(^u32)(v.data)^;
-		case 8: data = cast(u64)(^u64)(v.data)^;
-		}
 
-		if bit_field_name != "" {
-			io.write_string(fi.writer, bit_field_name);
-			io.write_byte(fi.writer, '{');
-		} else {
-			io.write_string(fi.writer, "bit_field{");
-		}
-		for name, i in info.names {
-			if i > 0 {
-				io.write_string(fi.writer, ", ");
-			}
-			bits := u64(info.bits[i]);
-			offset := u64(info.offsets[i]);
-			io.write_string(fi.writer, name);
-			io.write_string(fi.writer, " = ");
-
-			n := 8*u64(size_of(u64));
-			sa := n - bits;
-			u := data>>offset;
-			u <<= sa;
-			u >>= sa;
-
-			io.write_u64(fi.writer, u, 10);
-
-		}
-		io.write_byte(fi.writer, '}');
+fmt_write_indent :: proc(fi: ^Info) {
+	for in 0..<fi.indent {
+		io.write_byte(fi.writer, '\t');
 	}
 }
 
-fmt_opaque :: proc(fi: ^Info, v: any) {
-	is_nil :: proc(data: rawptr, n: int) -> bool {
-		if data == nil { return true; }
-		if n == 0 { return true; }
+fmt_write_array :: proc(fi: ^Info, array_data: rawptr, count: int, elem_size: int, elem_id: typeid, verb: rune) {
+	io.write_byte(fi.writer, '[');
+	defer io.write_byte(fi.writer, ']');
 
-		a := (^byte)(data);
-		for i in 0..<n {
-			if mem.ptr_offset(a, i)^ != 0 {
-				return false;
-			}
-		}
-		return true;
-	}
+	if fi.hash {
+		io.write_byte(fi.writer, '\n');
+		defer fmt_write_indent(fi);
 
-	rt :: runtime;
+		indent := fi.indent;
+		fi.indent += 1;
+		defer fi.indent = indent;
 
-	type_info := type_info_of(v.id);
+		for i in 0..<count {
+			fmt_write_indent(fi);
 
-	if is_nil(v.data, type_info.size) {
-		io.write_string(fi.writer, "nil");
-		return;
-	}
+			data := uintptr(array_data) + uintptr(i*elem_size);
+			fmt_arg(fi, any{rawptr(data), elem_id}, verb);
 
-	if ot, ok := rt.type_info_base(type_info).variant.(rt.Type_Info_Opaque); ok {
-		elem := rt.type_info_base(ot.elem);
-		if elem == nil { return; }
-		reflect.write_type(fi.writer, type_info);
-		io.write_byte(fi.writer, '{');
-		defer io.write_byte(fi.writer, '}');
-
-		#partial switch in elem.variant {
-		case rt.Type_Info_Integer, rt.Type_Info_Pointer, rt.Type_Info_Float:
-			fmt_value(fi, any{v.data, elem.id}, 'v');
-		case:
-			// Okay
+			io.write_string(fi.writer, ",\n");
 		}
 	} else {
-		reflect.write_type(fi.writer, type_info);
-		io.write_byte(fi.writer, '{');
-		io.write_byte(fi.writer, '}');
+		for i in 0..<count {
+			if i > 0 { io.write_string(fi.writer, ", "); }
+
+			data := uintptr(array_data) + uintptr(i*elem_size);
+			fmt_arg(fi, any{rawptr(data), elem_id}, verb);
+		}
 	}
 }
 
@@ -1433,7 +1389,7 @@ fmt_value :: proc(fi: ^Info, v: any, verb: rune) {
 			t := a;
 			y, mon, d := time.date(t);
 			h, min, s := time.clock(t);
-			ns := i64(t._nsec - (t._nsec/1e9 + time.UNIX_TO_ABSOLUTE)*1e9) % 1e9;
+			ns := (t._nsec - (t._nsec/1e9 + time.UNIX_TO_ABSOLUTE)*1e9) % 1e9;
 			write_padded_number(fi, i64(y), 4);
 			io.write_byte(fi.writer, '-');
 			write_padded_number(fi, i64(mon), 2);
@@ -1447,7 +1403,7 @@ fmt_value :: proc(fi: ^Info, v: any, verb: rune) {
 			io.write_byte(fi.writer, ':');
 			write_padded_number(fi, i64(s), 2);
 			io.write_byte(fi.writer, '.');
-			write_padded_number(fi, i64(ns), 9);
+			write_padded_number(fi, (ns), 9);
 			io.write_string(fi.writer, " +0000 UTC");
 			return;
 		}
@@ -1472,7 +1428,7 @@ fmt_value :: proc(fi: ^Info, v: any, verb: rune) {
 			hash   := fi.hash;   defer fi.hash = hash;
 			indent := fi.indent; defer fi.indent -= 1;
 
-			fi.hash = false;
+			// fi.hash = false;
 			fi.indent += 1;
 
 			if hash	{
@@ -1510,7 +1466,7 @@ fmt_value :: proc(fi: ^Info, v: any, verb: rune) {
 
 						if !hash && field_count > 0 { io.write_string(fi.writer, ", "); }
 						if hash {
-							for in 0..<fi.indent { io.write_byte(fi.writer, '\t'); }
+							fmt_write_indent(fi);
 						}
 
 						io.write_string(fi.writer, name);
@@ -1535,7 +1491,7 @@ fmt_value :: proc(fi: ^Info, v: any, verb: rune) {
 
 					if !hash && field_count > 0 { io.write_string(fi.writer, ", "); }
 					if hash {
-						for in 0..<fi.indent { io.write_byte(fi.writer, '\t'); }
+						fmt_write_indent(fi);
 					}
 
 					io.write_string(fi.writer, name);
@@ -1554,10 +1510,6 @@ fmt_value :: proc(fi: ^Info, v: any, verb: rune) {
 
 		case runtime.Type_Info_Bit_Set:
 			fmt_bit_set(fi, v);
-		case runtime.Type_Info_Bit_Field:
-			fmt_bit_field(fi, v);
-		case runtime.Type_Info_Opaque:
-			fmt_opaque(fi, v);
 		case:
 			fmt_value(fi, any{v.data, info.base.id}, verb);
 		}
@@ -1621,33 +1573,56 @@ fmt_value :: proc(fi: ^Info, v: any, verb: rune) {
 			s := strings.string_from_ptr((^byte)(v.data), info.count);
 			fmt_string(fi, s, verb);
 		} else {
+			fmt_write_array(fi, v.data, info.count, info.elem_size, info.elem.id, verb);
+		}
+
+	case runtime.Type_Info_Enumerated_Array:
+		if fi.hash {
+			io.write_string(fi.writer, "[\n");
+			defer {
+				io.write_byte(fi.writer, '\n');
+				fmt_write_indent(fi);
+				io.write_byte(fi.writer, ']');
+			}
+			indent := fi.indent;
+			fi.indent += 1;
+			defer fi.indent = indent;
+
+			for i in 0..<info.count {
+				fmt_write_indent(fi);
+
+				idx, ok := stored_enum_value_to_string(info.index, info.min_value, i);
+				if ok {
+					io.write_byte(fi.writer, '.');
+					io.write_string(fi.writer, idx);
+				} else {
+					io.write_i64(fi.writer, i64(info.min_value)+i64(i));
+				}
+				io.write_string(fi.writer, " = ");
+
+				data := uintptr(v.data) + uintptr(i*info.elem_size);
+				fmt_arg(fi, any{rawptr(data), info.elem.id}, verb);
+
+				io.write_string(fi.writer, ",\n");
+			}
+		} else {
 			io.write_byte(fi.writer, '[');
 			defer io.write_byte(fi.writer, ']');
 			for i in 0..<info.count {
 				if i > 0 { io.write_string(fi.writer, ", "); }
 
+				idx, ok := stored_enum_value_to_string(info.index, info.min_value, i);
+				if ok {
+					io.write_byte(fi.writer, '.');
+					io.write_string(fi.writer, idx);
+				} else {
+					io.write_i64(fi.writer, i64(info.min_value)+i64(i));
+				}
+				io.write_string(fi.writer, " = ");
+
 				data := uintptr(v.data) + uintptr(i*info.elem_size);
 				fmt_arg(fi, any{rawptr(data), info.elem.id}, verb);
 			}
-		}
-
-	case runtime.Type_Info_Enumerated_Array:
-		io.write_byte(fi.writer, '[');
-		defer io.write_byte(fi.writer, ']');
-		for i in 0..<info.count {
-			if i > 0 { io.write_string(fi.writer, ", "); }
-
-			idx, ok := stored_enum_value_to_string(info.index, info.min_value, i);
-			if ok {
-				io.write_byte(fi.writer, '.');
-				io.write_string(fi.writer, idx);
-			} else {
-				io.write_i64(fi.writer, i64(info.min_value)+i64(i));
-			}
-			io.write_string(fi.writer, " = ");
-
-			data := uintptr(v.data) + uintptr(i*info.elem_size);
-			fmt_arg(fi, any{rawptr(data), info.elem.id}, verb);
 		}
 
 	case runtime.Type_Info_Dynamic_Array:
@@ -1658,14 +1633,7 @@ fmt_value :: proc(fi: ^Info, v: any, verb: rune) {
 		} else if verb == 'p' {
 			fmt_pointer(fi, array.data, 'p');
 		} else {
-			io.write_byte(fi.writer, '[');
-			defer io.write_byte(fi.writer, ']');
-			for i in 0..<array.len {
-				if i > 0 { io.write_string(fi.writer, ", "); }
-
-				data := uintptr(array.data) + uintptr(i*info.elem_size);
-				fmt_arg(fi, any{rawptr(data), info.elem.id}, verb);
-			}
+			fmt_write_array(fi, array.data, array.len, info.elem_size, info.elem.id, verb);
 		}
 
 	case runtime.Type_Info_Simd_Vector:
@@ -1690,14 +1658,7 @@ fmt_value :: proc(fi: ^Info, v: any, verb: rune) {
 		} else if verb == 'p' {
 			fmt_pointer(fi, slice.data, 'p');
 		} else {
-			io.write_byte(fi.writer, '[');
-			defer io.write_byte(fi.writer, ']');
-			for i in 0..<slice.len {
-				if i > 0 { io.write_string(fi.writer, ", "); }
-
-				data := uintptr(slice.data) + uintptr(i*info.elem_size);
-				fmt_arg(fi, any{rawptr(data), info.elem.id}, verb);
-			}
+			fmt_write_array(fi, slice.data, slice.len, info.elem_size, info.elem.id, verb);
 		}
 	case runtime.Type_Info_Map:
 		if verb != 'v' {
@@ -1747,7 +1708,7 @@ fmt_value :: proc(fi: ^Info, v: any, verb: rune) {
 
 		fi.indent += 1;  defer fi.indent -= 1;
 		hash := fi.hash; defer fi.hash = hash;
-		fi.hash = false;
+		// fi.hash = false;
 
 
 		if hash	{ io.write_byte(fi.writer, '\n'); }
@@ -1795,7 +1756,7 @@ fmt_value :: proc(fi: ^Info, v: any, verb: rune) {
 
 					if !hash && field_count > 0 { io.write_string(fi.writer, ", "); }
 					if hash {
-						for in 0..<fi.indent { io.write_byte(fi.writer, '\t'); }
+						fmt_write_indent(fi);
 					}
 
 					io.write_string(fi.writer, name);
@@ -1832,7 +1793,7 @@ fmt_value :: proc(fi: ^Info, v: any, verb: rune) {
 
 				if !hash && field_count > 0 { io.write_string(fi.writer, ", "); }
 				if hash {
-					for in 0..<fi.indent { io.write_byte(fi.writer, '\t'); }
+					fmt_write_indent(fi);
 				}
 
 				io.write_string(fi.writer, name);
@@ -1881,7 +1842,7 @@ fmt_value :: proc(fi: ^Info, v: any, verb: rune) {
 		case u32:  tag = i64(i);
 		case i32:  tag = i64(i);
 		case u64:  tag = i64(i);
-		case i64:  tag = i64(i);
+		case i64:  tag = i;
 		case: panic("Invalid union tag type");
 		}
 		assert(tag >= 0);
@@ -1915,14 +1876,8 @@ fmt_value :: proc(fi: ^Info, v: any, verb: rune) {
 		id := (^typeid)(v.data)^;
 		reflect.write_typeid(fi.writer, id);
 
-	case runtime.Type_Info_Bit_Field:
-		fmt_bit_field(fi, v);
-
 	case runtime.Type_Info_Bit_Set:
 		fmt_bit_set(fi, v);
-
-	case runtime.Type_Info_Opaque:
-		fmt_opaque(fi, v);
 
 	case runtime.Type_Info_Relative_Pointer:
 		ptr := reflect.relative_pointer_to_absolute_raw(v.data, info.base_integer.id);
@@ -2059,7 +2014,7 @@ fmt_arg :: proc(fi: ^Info, arg: any, verb: rune) {
 	base_arg := arg;
 	base_arg.id = runtime.typeid_base(base_arg.id);
 	switch a in base_arg {
-	case bool:       fmt_bool(fi, bool(a), verb);
+	case bool:       fmt_bool(fi, a, verb);
 	case b8:         fmt_bool(fi, bool(a), verb);
 	case b16:        fmt_bool(fi, bool(a), verb);
 	case b32:        fmt_bool(fi, bool(a), verb);
@@ -2090,7 +2045,7 @@ fmt_arg :: proc(fi: ^Info, arg: any, verb: rune) {
 	case i32:     fmt_int(fi, u64(a), true,  32, verb);
 	case u32:     fmt_int(fi, u64(a), false, 32, verb);
 	case i64:     fmt_int(fi, u64(a), true,  64, verb);
-	case u64:     fmt_int(fi, u64(a), false, 64, verb);
+	case u64:     fmt_int(fi,     a,  false, 64, verb);
 	case int:     fmt_int(fi, u64(a), true,  8*size_of(int), verb);
 	case uint:    fmt_int(fi, u64(a), false, 8*size_of(uint), verb);
 	case uintptr: fmt_int(fi, u64(a), false, 8*size_of(uintptr), verb);
@@ -2115,7 +2070,7 @@ fmt_arg :: proc(fi: ^Info, arg: any, verb: rune) {
 	case u64be:     fmt_int(fi, u64(a), false, 64, verb);
 
 	case i128:     fmt_int_128(fi, u128(a), true,  128, verb);
-	case u128:     fmt_int_128(fi, u128(a), false, 128, verb);
+	case u128:     fmt_int_128(fi,       a, false, 128, verb);
 
 	case i128le:   fmt_int_128(fi, u128(a), true,  128, verb);
 	case u128le:   fmt_int_128(fi, u128(a), false, 128, verb);

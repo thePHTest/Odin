@@ -65,22 +65,22 @@ _fnv64a :: proc "contextless" (data: []byte, seed: u64 = INITIAL_HASH_SEED) -> u
 	return h;
 }
 
-default_hash :: inline proc "contextless" (data: []byte) -> uintptr {
+default_hash :: #force_inline proc "contextless" (data: []byte) -> uintptr {
 	return uintptr(_fnv64a(data));
 }
-default_hash_string :: inline proc "contextless" (s: string) -> uintptr {
+default_hash_string :: #force_inline proc "contextless" (s: string) -> uintptr {
 	return default_hash(transmute([]byte)(s));
 }
-default_hash_ptr :: inline proc "contextless" (data: rawptr, size: int) -> uintptr {
+default_hash_ptr :: #force_inline proc "contextless" (data: rawptr, size: int) -> uintptr {
 	s := Raw_Slice{data, size};
 	return default_hash(transmute([]byte)(s));
 }
 
 @(private)
-_default_hasher_const :: inline proc "contextless" (data: rawptr, seed: uintptr, $N: uint) -> uintptr where N <= 16 {
+_default_hasher_const :: #force_inline proc "contextless" (data: rawptr, seed: uintptr, $N: uint) -> uintptr where N <= 16 {
 	h := u64(seed) + 0xcbf29ce484222325;
 	p := uintptr(data);
-	inline for _ in 0..<N {
+	#unroll for _ in 0..<N {
 		b := u64((^byte)(p)^);
 		h = (h ~ b) * 0x100000001b3;
 		p += 1;
@@ -88,7 +88,7 @@ _default_hasher_const :: inline proc "contextless" (data: rawptr, seed: uintptr,
 	return uintptr(h);
 }
 
-default_hasher_n :: inline proc "contextless" (data: rawptr, seed: uintptr, N: int) -> uintptr {
+default_hasher_n :: #force_inline proc "contextless" (data: rawptr, seed: uintptr, N: int) -> uintptr {
 	h := u64(seed) + 0xcbf29ce484222325;
 	p := uintptr(data);
 	for _ in 0..<N {
@@ -101,22 +101,22 @@ default_hasher_n :: inline proc "contextless" (data: rawptr, seed: uintptr, N: i
 
 // NOTE(bill): There are loads of predefined ones to improve optimizations for small types
 
-default_hasher1  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return inline _default_hasher_const(data, seed,  1); }
-default_hasher2  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return inline _default_hasher_const(data, seed,  2); }
-default_hasher3  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return inline _default_hasher_const(data, seed,  3); }
-default_hasher4  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return inline _default_hasher_const(data, seed,  4); }
-default_hasher5  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return inline _default_hasher_const(data, seed,  5); }
-default_hasher6  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return inline _default_hasher_const(data, seed,  6); }
-default_hasher7  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return inline _default_hasher_const(data, seed,  7); }
-default_hasher8  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return inline _default_hasher_const(data, seed,  8); }
-default_hasher9  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return inline _default_hasher_const(data, seed,  9); }
-default_hasher10 :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return inline _default_hasher_const(data, seed, 10); }
-default_hasher11 :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return inline _default_hasher_const(data, seed, 11); }
-default_hasher12 :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return inline _default_hasher_const(data, seed, 12); }
-default_hasher13 :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return inline _default_hasher_const(data, seed, 13); }
-default_hasher14 :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return inline _default_hasher_const(data, seed, 14); }
-default_hasher15 :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return inline _default_hasher_const(data, seed, 15); }
-default_hasher16 :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return inline _default_hasher_const(data, seed, 16); }
+default_hasher1  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return #force_inline _default_hasher_const(data, seed,  1); }
+default_hasher2  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return #force_inline _default_hasher_const(data, seed,  2); }
+default_hasher3  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return #force_inline _default_hasher_const(data, seed,  3); }
+default_hasher4  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return #force_inline _default_hasher_const(data, seed,  4); }
+default_hasher5  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return #force_inline _default_hasher_const(data, seed,  5); }
+default_hasher6  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return #force_inline _default_hasher_const(data, seed,  6); }
+default_hasher7  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return #force_inline _default_hasher_const(data, seed,  7); }
+default_hasher8  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return #force_inline _default_hasher_const(data, seed,  8); }
+default_hasher9  :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return #force_inline _default_hasher_const(data, seed,  9); }
+default_hasher10 :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return #force_inline _default_hasher_const(data, seed, 10); }
+default_hasher11 :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return #force_inline _default_hasher_const(data, seed, 11); }
+default_hasher12 :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return #force_inline _default_hasher_const(data, seed, 12); }
+default_hasher13 :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return #force_inline _default_hasher_const(data, seed, 13); }
+default_hasher14 :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return #force_inline _default_hasher_const(data, seed, 14); }
+default_hasher15 :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return #force_inline _default_hasher_const(data, seed, 15); }
+default_hasher16 :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr { return #force_inline _default_hasher_const(data, seed, 16); }
 
 default_hasher_string :: proc "contextless" (data: rawptr, seed: uintptr) -> uintptr {
 	h := u64(seed) + 0xcbf29ce484222325;
@@ -159,14 +159,14 @@ __get_map_header :: proc "contextless" (m: ^$T/map[$K]$V) -> Map_Header {
 
 	header.equal = intrinsics.type_equal_proc(K);
 
-	header.entry_size    = int(size_of(Entry));
-	header.entry_align   = int(align_of(Entry));
+	header.entry_size    = size_of(Entry);
+	header.entry_align   = align_of(Entry);
 
-	header.key_offset    = uintptr(offset_of(Entry, key));
-	header.key_size      = int(size_of(K));
+	header.key_offset    = offset_of(Entry, key);
+	header.key_size      = size_of(K);
 
-	header.value_offset  = uintptr(offset_of(Entry, value));
-	header.value_size    = int(size_of(V));
+	header.value_offset  = offset_of(Entry, value);
+	header.value_size    = size_of(V);
 
 	return header;
 }
@@ -307,7 +307,7 @@ __dynamic_map_grow :: proc(using h: Map_Header, loc := #caller_location) {
 	__dynamic_map_rehash(h, new_count, loc);
 }
 
-__dynamic_map_full :: inline proc "contextless" (using h: Map_Header) -> bool {
+__dynamic_map_full :: #force_inline proc "contextless" (using h: Map_Header) -> bool {
 	return int(0.75 * f64(len(m.hashes))) <= m.entries.cap;
 }
 

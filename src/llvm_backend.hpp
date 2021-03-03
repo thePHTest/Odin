@@ -43,7 +43,6 @@ struct lbValue {
 enum lbAddrKind {
 	lbAddr_Default,
 	lbAddr_Map,
-	lbAddr_BitField,
 	lbAddr_Context,
 	lbAddr_SoaVariable,
 
@@ -62,9 +61,6 @@ struct lbAddr {
 			Type *type;
 			Type *result;
 		} map;
-		struct {
-			i32 value_index;
-		} bit_field;
 		struct {
 			Selection sel;
 		} ctx;
@@ -364,6 +360,7 @@ lbValue lb_find_or_add_entity_string(lbModule *m, String const &str);
 lbValue lb_generate_anonymous_proc_lit(lbModule *m, String const &prefix_name, Ast *expr, lbProcedure *parent = nullptr);
 
 bool lb_is_const(lbValue value);
+bool lb_is_const_or_global(lbValue value);
 bool lb_is_const_nil(lbValue value);
 String lb_get_const_string(lbModule *m, lbValue value);
 
@@ -447,10 +444,10 @@ lbCallingConventionKind const lb_calling_convention_map[ProcCC_MAX] = {
 	lbCallingConvention_C,            // ProcCC_Invalid,
 	lbCallingConvention_C,            // ProcCC_Odin,
 	lbCallingConvention_C,            // ProcCC_Contextless,
-	lbCallingConvention_C,            // ProcCC_Pure,
 	lbCallingConvention_C,            // ProcCC_CDecl,
 	lbCallingConvention_X86_StdCall,  // ProcCC_StdCall,
 	lbCallingConvention_X86_FastCall, // ProcCC_FastCall,
 
 	lbCallingConvention_C,            // ProcCC_None,
+	lbCallingConvention_C,            // ProcCC_InlineAsm,
 };

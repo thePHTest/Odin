@@ -41,6 +41,7 @@ enum ParseFileError {
 	ParseFile_Permission,
 	ParseFile_NotFound,
 	ParseFile_InvalidToken,
+	ParseFile_GeneralError,
 
 	ParseFile_Count,
 };
@@ -102,11 +103,13 @@ struct AstFile {
 	Array<Ast *> imports; // 'import'
 	isize        directive_count;
 
-	Ast *        curr_proc;
-	isize        error_count;
-	f64          time_to_tokenize; // seconds
-	f64          time_to_parse;    // seconds
+	Ast *          curr_proc;
+	isize          error_count;
+	ParseFileError last_error;
+	f64            time_to_tokenize; // seconds
+	f64            time_to_parse;    // seconds
 
+	bool is_private;
 	bool is_test;
 
 	CommentGroup *lead_comment;     // Comment (block) before the decl
@@ -204,15 +207,13 @@ enum ProcCallingConvention {
 	ProcCC_Invalid = 0,
 	ProcCC_Odin = 1,
 	ProcCC_Contextless = 2,
-	ProcCC_Pure = 3,
-	ProcCC_CDecl = 4,
-	ProcCC_StdCall = 5,
-	ProcCC_FastCall = 6,
+	ProcCC_CDecl = 3,
+	ProcCC_StdCall = 4,
+	ProcCC_FastCall = 5,
 
-	ProcCC_None = 7,
-	ProcCC_PureNone = 8,
+	ProcCC_None = 6,
 
-	ProcCC_InlineAsm = 9,
+	ProcCC_InlineAsm = 7,
 
 	ProcCC_MAX,
 
@@ -530,10 +531,6 @@ AST_KIND(_TypeBegin, "", bool) \
 		Token token; \
 		Ast *type; \
 	}) \
-	AST_KIND(OpaqueType, "opaque type", struct { \
-		Token token; \
-		Ast *type; \
-	}) \
 	AST_KIND(PolyType, "polymorphic type", struct { \
 		Token token; \
 		Ast * type;  \
@@ -593,11 +590,6 @@ AST_KIND(_TypeBegin, "", bool) \
 		Ast *        base_type; \
 		Slice<Ast *> fields; /* FieldValue */ \
 		bool         is_using; \
-	}) \
-	AST_KIND(BitFieldType, "bit field type", struct { \
-		Token        token; \
-		Slice<Ast *> fields; /* FieldValue with : */ \
-		Ast *        align; \
 	}) \
 	AST_KIND(BitSetType, "bit set type", struct { \
 		Token token; \

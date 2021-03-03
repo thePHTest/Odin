@@ -134,7 +134,6 @@ Token_Kind :: enum u32 {
 		Struct,      // struct
 		Union,       // union
 		Enum,        // enum
-		Bit_Field,   // bit_field
 		Bit_Set,     // bit_set
 		Map,         // map
 		Dynamic,     // dynamic
@@ -142,7 +141,6 @@ Token_Kind :: enum u32 {
 		Cast,        // cast
 		Transmute,   // transmute
 		Distinct,    // distinct
-		Opaque,      // opaque
 		Using,       // using
 		Inline,      // inline
 		No_Inline,   // no_inline
@@ -262,7 +260,6 @@ tokens := [Token_Kind.COUNT]string {
 	"struct",
 	"union",
 	"enum",
-	"bit_field",
 	"bit_set",
 	"map",
 	"dynamic",
@@ -270,7 +267,6 @@ tokens := [Token_Kind.COUNT]string {
 	"cast",
 	"transmute",
 	"distinct",
-	"opaque",
 	"using",
 	"inline",
 	"no_inline",

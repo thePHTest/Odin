@@ -6,6 +6,7 @@ foreign import libc "system:c"
 import "core:runtime"
 import "core:strings"
 import "core:c"
+import "core:strconv"
 
 Handle    :: distinct i32;
 File_Time :: distinct u64;
@@ -179,12 +180,12 @@ RTLD_GLOBAL       :: 0x100;
 // "Argv" arguments converted to Odin strings
 args := _alloc_command_line_arguments();
 
-_File_Time :: struct {
+Unix_File_Time :: struct {
 	seconds:     i64,
 	nanoseconds: i64,
 }
 
-Stat :: struct {
+OS_Stat :: struct {
 	device_id:     u64, // ID of device containing file
 	serial:        u64, // File serial number
 	nlink:         u64, // Number of hard links
@@ -197,14 +198,25 @@ Stat :: struct {
 	block_size:    i64, // Optimal bllocksize for I/O
 	blocks:        i64, // Number of 512-byte blocks allocated
 
-	last_access:   File_Time, // Time of last access
-	status_change: File_Time, // Time of last status change
-	modified:      File_Time, // Time of last modification
+	last_access:   Unix_File_Time, // Time of last access
+	modified:      Unix_File_Time, // Time of last modification
+	status_change: Unix_File_Time, // Time of last status change
 
 	_reserve1,
 	_reserve2,
 	_reserve3:     i64,
 };
+
+// NOTE(laleksic, 2021-01-21): Comment and rename these to match OS_Stat above
+Dirent :: struct {
+	ino:    u64,
+	off:    u64,
+	reclen: u16,
+	type:   u8,
+	name:   [256]byte,
+};
+
+Dir :: distinct rawptr; // DIR*
 
 // File type
 S_IFMT   :: 0o170000; // Type of file mask
@@ -240,13 +252,13 @@ S_ISGID :: 0o2000; // Set group id on execution
 S_ISVTX :: 0o1000; // Directory restrcted delete
 
 
-S_ISLNK  :: inline proc(m: u32) -> bool { return (m & S_IFMT) == S_IFLNK;  }
-S_ISREG  :: inline proc(m: u32) -> bool { return (m & S_IFMT) == S_IFREG;  }
-S_ISDIR  :: inline proc(m: u32) -> bool { return (m & S_IFMT) == S_IFDIR;  }
-S_ISCHR  :: inline proc(m: u32) -> bool { return (m & S_IFMT) == S_IFCHR;  }
-S_ISBLK  :: inline proc(m: u32) -> bool { return (m & S_IFMT) == S_IFBLK;  }
-S_ISFIFO :: inline proc(m: u32) -> bool { return (m & S_IFMT) == S_IFIFO;  }
-S_ISSOCK :: inline proc(m: u32) -> bool { return (m & S_IFMT) == S_IFSOCK; }
+S_ISLNK  :: #force_inline proc(m: u32) -> bool { return (m & S_IFMT) == S_IFLNK;  }
+S_ISREG  :: #force_inline proc(m: u32) -> bool { return (m & S_IFMT) == S_IFREG;  }
+S_ISDIR  :: #force_inline proc(m: u32) -> bool { return (m & S_IFMT) == S_IFDIR;  }
+S_ISCHR  :: #force_inline proc(m: u32) -> bool { return (m & S_IFMT) == S_IFCHR;  }
+S_ISBLK  :: #force_inline proc(m: u32) -> bool { return (m & S_IFMT) == S_IFBLK;  }
+S_ISFIFO :: #force_inline proc(m: u32) -> bool { return (m & S_IFMT) == S_IFIFO;  }
+S_ISSOCK :: #force_inline proc(m: u32) -> bool { return (m & S_IFMT) == S_IFSOCK; }
 
 F_OK :: 0; // Test for file existance
 X_OK :: 1; // Test for execute permission
@@ -266,8 +278,14 @@ foreign libc {
 	@(link_name="lseek64")          _unix_seek          :: proc(fd: Handle, offset: i64, whence: c.int) -> i64 ---;
 	@(link_name="gettid")           _unix_gettid        :: proc() -> u64 ---;
 	@(link_name="getpagesize")      _unix_getpagesize   :: proc() -> c.int ---;
-	@(link_name="stat64")           _unix_stat          :: proc(path: cstring, stat: ^Stat) -> c.int ---;
-	@(link_name="fstat")            _unix_fstat         :: proc(fd: Handle, stat: ^Stat) -> c.int ---;
+	@(link_name="stat64")           _unix_stat          :: proc(path: cstring, stat: ^OS_Stat) -> c.int ---;
+	@(link_name="lstat")            _unix_lstat         :: proc(path: cstring, stat: ^OS_Stat) -> c.int ---;
+	@(link_name="fstat")            _unix_fstat         :: proc(fd: Handle, stat: ^OS_Stat) -> c.int ---;
+	@(link_name="fdopendir")        _unix_fdopendir     :: proc(fd: Handle) -> Dir ---;
+	@(link_name="closedir")         _unix_closedir      :: proc(dirp: Dir) -> c.int ---;
+	@(link_name="rewinddir")        _unix_rewinddir     :: proc(dirp: Dir) ---;
+	@(link_name="readdir_r")        _unix_readdir_r     :: proc(dirp: Dir, entry: ^Dirent, result: ^^Dirent) -> c.int ---;
+	@(link_name="readlink")         _unix_readlink      :: proc(path: cstring, buf: ^byte, bufsiz: c.size_t) -> c.ssize_t ---;
 	@(link_name="access")           _unix_access        :: proc(path: cstring, mask: c.int) -> c.int ---;
 
 	@(link_name="malloc")           _unix_malloc        :: proc(size: c.size_t) -> rawptr ---;
@@ -277,6 +295,7 @@ foreign libc {
 	@(link_name="getenv")           _unix_getenv        :: proc(cstring) -> cstring ---;
 	@(link_name="getcwd")           _unix_getcwd        :: proc(buf: cstring, len: c.size_t) -> cstring ---;
 	@(link_name="chdir")            _unix_chdir         :: proc(buf: cstring) -> c.int ---;
+	@(link_name="realpath")         _unix_realpath      :: proc(path: cstring, resolved_path: rawptr) -> rawptr ---;
 
 	@(link_name="exit")             _unix_exit          :: proc(status: c.int) -> ! ---;
 }
@@ -341,11 +360,11 @@ seek :: proc(fd: Handle, offset: i64, whence: int) -> (i64, Errno) {
 }
 
 file_size :: proc(fd: Handle) -> (i64, Errno) {
-	s, err := fstat(fd);
+	s, err := _fstat(fd);
 	if err != ERROR_NONE {
-		return -1, err;
+		return 0, err;
 	}
-	return s.size, ERROR_NONE;
+	return max(s.size, 0), ERROR_NONE;
 }
 
 
@@ -360,26 +379,29 @@ last_write_time :: proc(fd: Handle) -> File_Time {}
 last_write_time_by_name :: proc(name: string) -> File_Time {}
 */
 last_write_time :: proc(fd: Handle) -> (File_Time, Errno) {
-	s, err := fstat(fd);
+	s, err := _fstat(fd);
 	if err != ERROR_NONE {
 		return 0, err;
 	}
-	return File_Time(s.modified), ERROR_NONE;
+	modified := s.modified.seconds * 1_000_000_000 + s.modified.nanoseconds;
+	return File_Time(modified), ERROR_NONE;
 }
 
 last_write_time_by_name :: proc(name: string) -> (File_Time, Errno) {
-	s, err := stat(name);
+	s, err := _stat(name);
 	if err != ERROR_NONE {
 		return 0, err;
 	}
-	return File_Time(s.modified), ERROR_NONE;
+	modified := s.modified.seconds * 1_000_000_000 + s.modified.nanoseconds;
+	return File_Time(modified), ERROR_NONE;
 }
 
-stat :: inline proc(path: string) -> (Stat, Errno) {
+@private
+_stat :: proc(path: string) -> (OS_Stat, Errno) {
 	cstr := strings.clone_to_cstring(path);
 	defer delete(cstr);
 
-	s: Stat;
+	s: OS_Stat;
 	result := _unix_stat(cstr, &s);
 	if result == -1 {
 		return s, Errno(get_last_error());
@@ -387,8 +409,22 @@ stat :: inline proc(path: string) -> (Stat, Errno) {
 	return s, ERROR_NONE;
 }
 
-fstat :: inline proc(fd: Handle) -> (Stat, Errno) {
-	s: Stat;
+@private
+_lstat :: proc(path: string) -> (OS_Stat, Errno) {
+	cstr := strings.clone_to_cstring(path);
+	defer delete(cstr);
+
+	s: OS_Stat;
+	result := _unix_lstat(cstr, &s);
+	if result == -1 {
+		return s, Errno(get_last_error());
+	}
+	return s, ERROR_NONE;
+}
+
+@private
+_fstat :: proc(fd: Handle) -> (OS_Stat, Errno) {
+	s: OS_Stat;
 	result := _unix_fstat(fd, &s);
 	if result == -1 {
 		return s, Errno(get_last_error());
@@ -396,7 +432,104 @@ fstat :: inline proc(fd: Handle) -> (Stat, Errno) {
 	return s, ERROR_NONE;
 }
 
-access :: inline proc(path: string, mask: int) -> (bool, Errno) {
+@private
+_fdopendir :: proc(fd: Handle) -> (Dir, Errno) {
+	dirp := _unix_fdopendir(fd);
+	if dirp == cast(Dir)nil {
+		return nil, Errno(get_last_error());
+	}
+	return dirp, ERROR_NONE;
+}
+
+@private
+_closedir :: proc(dirp: Dir) -> Errno {
+	rc := _unix_closedir(dirp);
+	if rc != 0 {
+		return Errno(get_last_error());
+	}
+	return ERROR_NONE;
+}
+
+@private
+_rewinddir :: proc(dirp: Dir) {
+	_unix_rewinddir(dirp);
+}
+
+@private
+_readdir :: proc(dirp: Dir) -> (entry: Dirent, err: Errno, end_of_stream: bool) {
+	result: ^Dirent;
+	rc := _unix_readdir_r(dirp, &entry, &result);
+
+	if rc != 0 {
+		err = Errno(get_last_error());
+		return;
+	}
+	err = ERROR_NONE;
+
+	if result == nil {
+		end_of_stream = true;
+		return;
+	}
+	end_of_stream = false;
+
+	return;
+}
+
+@private
+_readlink :: proc(path: string) -> (string, Errno) {
+	path_cstr := strings.clone_to_cstring(path);
+	defer delete(path_cstr);
+
+	bufsz : uint = 256;
+	buf := make([]byte, bufsz);
+	for {
+		rc := _unix_readlink(path_cstr, &(buf[0]), bufsz);
+		if rc == -1 {
+			delete(buf);
+			return "", Errno(get_last_error());
+		} else if rc == int(bufsz) {
+			// NOTE(laleksic, 2021-01-21): Any cleaner way to resize the slice?
+			bufsz *= 2;
+			delete(buf);
+			buf = make([]byte, bufsz);
+		} else {
+			return strings.string_from_ptr(&buf[0], rc), ERROR_NONE;
+		}
+	}
+}
+
+absolute_path_from_handle :: proc(fd: Handle) -> (string, Errno) {
+	buf : [256]byte;
+	fd_str := strconv.itoa( buf[:], cast(int)fd );
+
+	procfs_path := strings.concatenate( []string{ "/proc/self/fd/", fd_str } );
+	defer delete(procfs_path);
+
+	return _readlink(procfs_path);
+}
+
+absolute_path_from_relative :: proc(rel: string) -> (path: string, err: Errno) {
+	rel := rel;
+	if rel == "" {
+		rel = ".";
+	}
+
+	rel_cstr := strings.clone_to_cstring(rel);
+	defer delete(rel_cstr);
+
+	path_ptr := _unix_realpath(rel_cstr, nil);
+	if path_ptr == nil {
+		return "", Errno(get_last_error());
+	}
+	defer _unix_free(path_ptr);
+
+	path_cstr := transmute(cstring)path_ptr;
+	path = strings.clone( string(path_cstr) );
+
+	return path, ERROR_NONE;
+}
+
+access :: proc(path: string, mask: int) -> (bool, Errno) {
 	cstr := strings.clone_to_cstring(path);
 	defer delete(cstr);
 	result := _unix_access(cstr, c.int(mask));
@@ -465,20 +598,20 @@ current_thread_id :: proc "contextless" () -> int {
 	return syscall(SYS_GETTID);
 }
 
-dlopen :: inline proc(filename: string, flags: int) -> rawptr {
+dlopen :: proc(filename: string, flags: int) -> rawptr {
 	cstr := strings.clone_to_cstring(filename);
 	defer delete(cstr);
 	handle := _unix_dlopen(cstr, c.int(flags));
 	return handle;
 }
-dlsym :: inline proc(handle: rawptr, symbol: string) -> rawptr {
+dlsym :: proc(handle: rawptr, symbol: string) -> rawptr {
 	assert(handle != nil);
 	cstr := strings.clone_to_cstring(symbol);
 	defer delete(cstr);
 	proc_handle := _unix_dlsym(handle, cstr);
 	return proc_handle;
 }
-dlclose :: inline proc(handle: rawptr) -> bool {
+dlclose :: proc(handle: rawptr) -> bool {
 	assert(handle != nil);
 	return _unix_dlclose(handle) == 0;
 }

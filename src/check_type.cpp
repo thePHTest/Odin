@@ -58,22 +58,6 @@ void populate_using_entity_scope(CheckerContext *ctx, Ast *node, AstField *field
 				}
 			}
 		}
-	} else if (t->kind == Type_BitField) {
-		for_array(i, t->BitField.fields) {
-			Entity *f = t->BitField.fields[i];
-			String name = f->token.string;
-			Entity *e = scope_lookup_current(ctx->scope, name);
-			if ((e != nullptr && name != "_") && (e != f)) {
-				// TODO(bill): Better type error
-				if (str != nullptr) {
-					error(e->token, "'%.*s' is already declared in '%s'", LIT(name), str);
-				} else {
-					error(e->token, "'%.*s' is already declared", LIT(name));
-				}
-			} else {
-				add_entity(ctx->checker, ctx->scope, nullptr, f);
-			}
-		}
 	} else if (t->kind == Type_Array && t->Array.count <= 4) {
 		Entity *e = nullptr;
 		String name = {};
@@ -106,8 +90,6 @@ bool does_field_type_allow_using(Type *t) {
 	if (is_type_struct(t)) {
 		return true;
 	} else if (is_type_raw_union(t)) {
-		return true;
-	} else if (is_type_bit_field(t)) {
 		return true;
 	} else if (is_type_array(t)) {
 		return t->Array.count <= 4;
@@ -981,82 +963,6 @@ void check_enum_type(CheckerContext *ctx, Type *enum_type, Type *named_type, Ast
 	enum_type->Enum.max_value_index = max_value_index;
 }
 
-
-void check_bit_field_type(CheckerContext *ctx, Type *bit_field_type, Ast *node) {
-	ast_node(bft, BitFieldType, node);
-	GB_ASSERT(is_type_bit_field(bit_field_type));
-
-	auto fields  = array_make<Entity*>(permanent_allocator(), 0, bft->fields.count);
-	auto sizes   = array_make<u32>    (permanent_allocator(), 0, bft->fields.count);
-	auto offsets = array_make<u32>    (permanent_allocator(), 0, bft->fields.count);
-
-	scope_reserve(ctx->scope, bft->fields.count);
-
-	u32 curr_offset = 0;
-	for_array(i, bft->fields) {
-		Ast *field = bft->fields[i];
-		GB_ASSERT(field->kind == Ast_FieldValue);
-		Ast *ident = field->FieldValue.field;
-		Ast *value = field->FieldValue.value;
-
-		if (ident->kind != Ast_Ident) {
-			error(field, "A bit field value's name must be an identifier");
-			continue;
-		}
-		String name = ident->Ident.token.string;
-
-		Operand o = {};
-		check_expr(ctx, &o, value);
-		if (o.mode != Addressing_Constant) {
-			error(value, "Bit field bit size must be a constant");
-			continue;
-		}
-		ExactValue v = exact_value_to_integer(o.value);
-		if (v.kind != ExactValue_Integer) {
-			error(value, "Bit field bit size must be a constant integer");
-			continue;
-		}
-		i64 bits_ = big_int_to_i64(&v.value_integer); // TODO(bill): what if the integer is huge?
-		if (bits_ < 0 || bits_ > 64) {
-			error(value, "Bit field's bit size must be within the range 1...64, got %lld", cast(long long)bits_);
-			continue;
-		}
-		u32 bits = cast(u32)bits_;
-
-		Type *value_type = alloc_type_bit_field_value(bits);
-		Entity *e = alloc_entity_variable(bit_field_type->BitField.scope, ident->Ident.token, value_type);
-		e->identifier = ident;
-		e->flags |= EntityFlag_BitFieldValue;
-
-		if (!is_blank_ident(name) &&
-		    scope_lookup_current(ctx->scope, name) != nullptr) {
-			error(ident, "'%.*s' is already declared in this bit field", LIT(name));
-		} else {
-			add_entity(ctx->checker, ctx->scope, nullptr, e);
-			// TODO(bill): Should this entity be "used"?
-			add_entity_use(ctx, field, e);
-
-			array_add(&fields,  e);
-			array_add(&offsets, curr_offset);
-			array_add(&sizes,   bits);
-
-			curr_offset += bits;
-		}
-	}
-	GB_ASSERT(fields.count <= bft->fields.count);
-
-	bit_field_type->BitField.fields      = fields;
-	bit_field_type->BitField.sizes       = sizes;
-	bit_field_type->BitField.offsets     = offsets;
-
-	if (bft->align != nullptr) {
-		i64 custom_align = 1;
-		if (check_custom_align(ctx, bft->align, &custom_align)) {
-			bit_field_type->BitField.custom_align = custom_align;
-		}
-	}
-}
-
 bool is_type_valid_bit_set_range(Type *t) {
 	if (is_type_integer(t)) {
 		return true;
@@ -1768,6 +1674,25 @@ Type *check_get_params(CheckerContext *ctx, Scope *scope, Ast *_params, bool *is
 							}
 						}
 					}
+					if (type != t_invalid && !check_is_assignable_to(ctx, &op, type)) {
+						bool ok = true;
+						if (p->flags&FieldFlag_auto_cast) {
+							if (!check_is_castable_to(ctx, &op, type)) {
+								ok = false;
+							}
+						}
+						if (!ok) {
+							success = false;
+							#if 0
+								gbString got = type_to_string(op.type);
+								gbString expected = type_to_string(type);
+								error(op.expr, "Cannot assigned type to parameter, got type '%s', expected '%s'", got, expected);
+								gb_string_free(expected);
+								gb_string_free(got);
+							#endif
+						}
+					}
+
 					if (is_type_untyped(default_type(type))) {
 						gbString str = type_to_string(type);
 						error(op.expr, "Cannot determine type from the parameter, got '%s'", str);
@@ -2066,7 +1991,6 @@ Array<Type *> systemv_distribute_struct_fields(Type *t) {
 	case Type_Union:
 	case Type_DynamicArray:
 	case Type_Map:
-	case Type_BitField: // TODO(bill): Ignore?
 		// NOTE(bill, 2019-10-10): Odin specific, don't worry about C calling convention yet
 		goto DEFAULT;
 
@@ -2267,7 +2191,7 @@ Type *type_to_abi_compat_param_type(gbAllocator a, Type *original_type, ProcCall
 		return t_rawptr;
 	}
 
-	if (cc == ProcCC_None || cc == ProcCC_PureNone || cc == ProcCC_InlineAsm) {
+	if (is_calling_convention_none(cc)) {
 		return new_type;
 	}
 
@@ -2407,7 +2331,7 @@ Type *type_to_abi_compat_result_type(gbAllocator a, Type *original_type, ProcCal
 	if (build_context.ODIN_OS == "windows") {
 		if (build_context.ODIN_ARCH == "amd64") {
 			if (is_type_integer_128bit(single_type)) {
-				if (cc == ProcCC_None || cc == ProcCC_PureNone) {
+				if (is_calling_convention_none(cc)) {
 					return original_type;
 				} else {
 					return alloc_type_simd_vector(2, t_u64);
@@ -2473,7 +2397,7 @@ bool abi_compat_return_by_pointer(gbAllocator a, ProcCallingConvention cc, Type 
 	if (abi_return_type == nullptr) {
 		return false;
 	}
-	if (cc == ProcCC_None || cc == ProcCC_PureNone || cc == ProcCC_InlineAsm) {
+	if (is_calling_convention_none(cc)) {
 		return false;
 	}
 
@@ -2537,7 +2461,6 @@ void set_procedure_abi_types(Type *type) {
 			switch (type->Proc.calling_convention) {
 			case ProcCC_Odin:
 			case ProcCC_Contextless:
-			case ProcCC_Pure:
 				if (is_type_pointer(new_type) && !is_type_pointer(e->type) && !is_type_proc(e->type)) {
 					e->flags |= EntityFlag_ImplicitReference;
 				}
@@ -2634,11 +2557,6 @@ bool check_procedure_type(CheckerContext *ctx, Type *type, Ast *proc_type_node, 
 		Entity *first = results->Tuple.variables[0];
 		type->Proc.has_named_results = first->token.string != "";
 	}
-
-	if (result_count == 0 && cc == ProcCC_Pure) {
-		error(proc_type_node, "\"pure\" procedures must have at least 1 return value");
-	}
-
 
 	bool optional_ok = (pt->tags & ProcTag_optional_ok) != 0;
 	if (optional_ok) {
@@ -3453,13 +3371,6 @@ bool check_type_internal(CheckerContext *ctx, Ast *e, Type **type, Type *named_t
 		return true;
 	case_end;
 
-	case_ast_node(ot, OpaqueType, e);
-		Type *elem = strip_opaque_type(check_type_expr(ctx, ot->type, nullptr));
-		*type = alloc_type_opaque(elem);
-		set_base_type(named_type, *type);
-		return true;
-	case_end;
-
 	case_ast_node(at, ArrayType, e);
 		if (at->count != nullptr) {
 			Operand o = {};
@@ -3615,15 +3526,6 @@ bool check_type_internal(CheckerContext *ctx, Ast *e, Type **type, Type *named_t
 		(*type)->Enum.node = e;
 
 		ctx->in_enum_type = false;
-		return true;
-	case_end;
-
-	case_ast_node(et, BitFieldType, e);
-		*type = alloc_type_bit_field();
-		set_base_type(named_type, *type);
-		check_open_scope(ctx, e);
-		check_bit_field_type(ctx, *type, e);
-		check_close_scope(ctx);
 		return true;
 	case_end;
 

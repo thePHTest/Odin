@@ -57,6 +57,8 @@ enum EntityFlag : u32 {
 
 	EntityFlag_SoaPtrField   = 1<<19, // to allow s.x[0] where `s.x` is a pointer rather than a slice
 
+	EntityFlag_ProcBodyChecked = 1<<20,
+
 	EntityFlag_CVarArg       = 1<<21,
 	EntityFlag_AutoCast      = 1<<22,
 
@@ -197,6 +199,9 @@ bool is_entity_exported(Entity *e, bool allow_builtin = false) {
 	}
 
 	if (e->flags & EntityFlag_NotExported) {
+		return false;
+	}
+	if (e->file != nullptr && e->file->is_private) {
 		return false;
 	}
 

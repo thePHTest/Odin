@@ -96,9 +96,6 @@ Type *check_init_variable(CheckerContext *ctx, Entity *e, Operand *operand, Stri
 			e->type = t_invalid;
 			return nullptr;
 		}
-		if (is_type_bit_field_value(t)) {
-			t = default_bit_field_value_type(t);
-		}
 		GB_ASSERT(is_type_typed(t));
 		e->type = t;
 	}
@@ -204,7 +201,6 @@ bool is_type_distinct(Ast *node) {
 	case Ast_StructType:
 	case Ast_UnionType:
 	case Ast_EnumType:
-	case Ast_BitFieldType:
 	case Ast_ProcType:
 		return true;
 
@@ -213,9 +209,6 @@ bool is_type_distinct(Ast *node) {
 	case Ast_DynamicArrayType:
 	case Ast_MapType:
 		return false;
-
-	case Ast_OpaqueType:
-		return true;
 	}
 	return false;
 }
@@ -1182,9 +1175,6 @@ void check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *decl, Type *ty
 		switch (type->Proc.calling_convention) {
 		case ProcCC_None:
 			error(body, "Procedures with the calling convention \"none\" are not allowed a body");
-			break;
-		case ProcCC_PureNone:
-			error(body, "Procedures with the calling convention \"pure_none\" are not allowed a body");
 			break;
 		}
 	}

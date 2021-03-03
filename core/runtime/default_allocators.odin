@@ -65,12 +65,7 @@ default_temp_allocator_proc :: proc(allocator_data: rawptr, mode: Allocator_Mode
 	s := (^Default_Temp_Allocator)(allocator_data);
 
 	if s.data == nil {
-		a := context.allocator;
-		if !(context.allocator.procedure != default_temp_allocator_proc &&
-		     context.allocator.data != allocator_data) {
-			a = default_allocator();
-		}
-		default_temp_allocator_init(s, DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE, a);
+		default_temp_allocator_init(s, DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE, default_allocator());
 	}
 
 	size := size;
@@ -132,7 +127,7 @@ default_temp_allocator_proc :: proc(allocator_data: rawptr, mode: Allocator_Mode
 		old_ptr := uintptr(old_memory);
 
 		if s.prev_allocation == old_memory {
-			s.curr_offset = int(uintptr(s.prev_allocation) - uintptr(start));
+			s.curr_offset = int(uintptr(s.prev_allocation) - start);
 			s.prev_allocation = nil;
 			return nil;
 		}

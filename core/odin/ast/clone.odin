@@ -243,8 +243,6 @@ clone_node :: proc(node: ^Node) -> ^Node {
 		r.type = clone(r.type);
 	case Distinct_Type:
 		r.type = clone(r.type);
-	case Opaque_Type:
-		r.type = clone(r.type);
 	case Poly_Type:
 		r.type = auto_cast clone(r.type);
 		r.specialization = clone(r.specialization);
@@ -268,8 +266,6 @@ clone_node :: proc(node: ^Node) -> ^Node {
 		r.variants = clone(r.variants);
 	case Enum_Type:
 		r.base_type = clone(r.base_type);
-		r.fields = clone(r.fields);
-	case Bit_Field_Type:
 		r.fields = clone(r.fields);
 	case Bit_Set_Type:
 		r.elem = clone(r.elem);

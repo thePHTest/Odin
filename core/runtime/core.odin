@@ -25,13 +25,11 @@ Calling_Convention :: enum u8 {
 	Invalid     = 0,
 	Odin        = 1,
 	Contextless = 2,
-	Pure        = 3,
-	CDecl       = 4,
-	Std_Call    = 5,
-	Fast_Call   = 6,
+	CDecl       = 3,
+	Std_Call    = 4,
+	Fast_Call   = 5,
 
-	None        = 7,
-	Pure_None   = 8,
+	None        = 6,
 }
 
 Type_Info_Enum_Value :: distinct i64;
@@ -136,19 +134,11 @@ Type_Info_Map :: struct {
 	key_equal:        Equal_Proc,
 	key_hasher:       Hasher_Proc,
 };
-Type_Info_Bit_Field :: struct {
-	names:   []string,
-	bits:    []i32,
-	offsets: []i32,
-};
 Type_Info_Bit_Set :: struct {
 	elem:       ^Type_Info,
 	underlying: ^Type_Info, // Possibly nil
 	lower:      i64,
 	upper:      i64,
-};
-Type_Info_Opaque :: struct {
-	elem: ^Type_Info,
 };
 Type_Info_Simd_Vector :: struct {
 	elem:       ^Type_Info,
@@ -199,9 +189,7 @@ Type_Info :: struct {
 		Type_Info_Union,
 		Type_Info_Enum,
 		Type_Info_Map,
-		Type_Info_Bit_Field,
 		Type_Info_Bit_Set,
-		Type_Info_Opaque,
 		Type_Info_Simd_Vector,
 		Type_Info_Relative_Pointer,
 		Type_Info_Relative_Slice,
@@ -231,23 +219,21 @@ Typeid_Kind :: enum u8 {
 	Union,
 	Enum,
 	Map,
-	Bit_Field,
 	Bit_Set,
-	Opaque,
 	Simd_Vector,
 	Relative_Pointer,
 	Relative_Slice,
 }
 #assert(len(Typeid_Kind) < 32);
 
-Typeid_Bit_Field :: bit_field #align align_of(uintptr) {
-	index:    8*size_of(uintptr) - 8,
-	kind:     5, // Typeid_Kind
-	named:    1,
-	special:  1, // signed, cstring, etc
-	reserved: 1,
-}
-#assert(size_of(Typeid_Bit_Field) == size_of(uintptr));
+// Typeid_Bit_Field :: bit_field #align align_of(uintptr) {
+// 	index:    8*size_of(uintptr) - 8,
+// 	kind:     5, // Typeid_Kind
+// 	named:    1,
+// 	special:  1, // signed, cstring, etc
+// 	reserved: 1,
+// }
+// #assert(size_of(Typeid_Bit_Field) == size_of(uintptr));
 
 // NOTE(bill): only the ones that are needed (not all types)
 // This will be set by the compiler
@@ -408,7 +394,6 @@ type_info_core :: proc "contextless" (info: ^Type_Info) -> ^Type_Info {
 		#partial switch i in base.variant {
 		case Type_Info_Named:  base = i.base;
 		case Type_Info_Enum:   base = i.base;
-		case Type_Info_Opaque: base = i.elem;
 		case: break loop;
 		}
 	}
@@ -417,8 +402,9 @@ type_info_core :: proc "contextless" (info: ^Type_Info) -> ^Type_Info {
 type_info_base_without_enum :: type_info_core;
 
 __type_info_of :: proc "contextless" (id: typeid) -> ^Type_Info {
-	data := transmute(Typeid_Bit_Field)id;
-	n := int(data.index);
+	MASK :: 1<<(8*size_of(typeid) - 8) - 1;
+	data := transmute(uintptr)id;
+	n := int(data & MASK);
 	if n < 0 || n >= len(type_table) {
 		n = 0;
 	}

@@ -3,7 +3,7 @@
 
 void check_expr(CheckerContext *c, Operand *operand, Ast *expression);
 void check_expr_or_type(CheckerContext *c, Operand *operand, Ast *expression, Type *type_hint=nullptr);
-
+void add_comparison_procedures_for_fields(CheckerContext *c, Type *t);
 
 bool is_operand_value(Operand o) {
 	switch (o.mode) {
@@ -333,7 +333,6 @@ void check_open_scope(CheckerContext *c, Ast *node) {
 	case Ast_StructType:
 	case Ast_EnumType:
 	case Ast_UnionType:
-	case Ast_BitFieldType:
 	case Ast_BitSetType:
 		scope->flags |= ScopeFlag_Type;
 		break;
@@ -647,9 +646,10 @@ void add_package_dependency(CheckerContext *c, char const *package_name, char co
 	String n = make_string_c(name);
 	AstPackage *p = get_core_package(&c->checker->info, make_string_c(package_name));
 	Entity *e = scope_lookup(p->scope, n);
+	e->flags |= EntityFlag_Used;
 	GB_ASSERT_MSG(e != nullptr, "%s", name);
+	GB_ASSERT(c->decl != nullptr);
 	ptr_set_add(&c->decl->deps, e);
-	// add_type_info_type(c, e->type);
 }
 
 void add_declaration_dependency(CheckerContext *c, Entity *e) {
@@ -1258,9 +1258,6 @@ void add_type_info_type(CheckerContext *c, Type *t) {
 		return;
 	}
 	t = default_type(t);
-	if (is_type_bit_field_value(t)) {
-		t = default_bit_field_value_type(t);
-	}
 	if (is_type_untyped(t)) {
 		return; // Could be nil
 	}
@@ -1350,10 +1347,6 @@ void add_type_info_type(CheckerContext *c, Type *t) {
 		}
 		break;
 
-	case Type_Opaque:
-		add_type_info_type(c, bt->Opaque.elem);
-		break;
-
 	case Type_BitSet:
 		add_type_info_type(c, bt->BitSet.elem);
 		add_type_info_type(c, bt->BitSet.underlying);
@@ -1425,11 +1418,7 @@ void add_type_info_type(CheckerContext *c, Type *t) {
 			Entity *f = bt->Struct.fields[i];
 			add_type_info_type(c, f->type);
 		}
-		break;
-
-	case Type_BitFieldValue:
-		break;
-	case Type_BitField:
+		add_comparison_procedures_for_fields(c, bt);
 		break;
 
 	case Type_Map:
@@ -1504,9 +1493,6 @@ void add_min_dep_type_info(Checker *c, Type *t) {
 		return;
 	}
 	t = default_type(t);
-	if (is_type_bit_field_value(t)) {
-		t = default_bit_field_value_type(t);
-	}
 	if (is_type_untyped(t)) {
 		return; // Could be nil
 	}
@@ -1568,10 +1554,6 @@ void add_min_dep_type_info(Checker *c, Type *t) {
 			add_min_dep_type_info(c, t_f64);
 			break;
 		}
-		break;
-
-	case Type_Opaque:
-		add_min_dep_type_info(c, bt->Opaque.elem);
 		break;
 
 	case Type_BitSet:
@@ -1644,11 +1626,6 @@ void add_min_dep_type_info(Checker *c, Type *t) {
 			Entity *f = bt->Struct.fields[i];
 			add_min_dep_type_info(c, f->type);
 		}
-		break;
-
-	case Type_BitFieldValue:
-		break;
-	case Type_BitField:
 		break;
 
 	case Type_Map:
@@ -1745,6 +1722,17 @@ void add_dependency_to_set(Checker *c, Entity *entity) {
 	}
 }
 
+void force_add_dependency_entity(Checker *c, Scope *scope, String const &name) {
+	Entity *e = scope_lookup(scope, name);
+	if (e == nullptr) {
+		return;
+	}
+	GB_ASSERT_MSG(e != nullptr, "unable to find %.*s", LIT(name));
+	e->flags |= EntityFlag_Used;
+	add_dependency_to_set(c, e);
+}
+
+
 
 void generate_minimum_dependency_set(Checker *c, Entity *start) {
 	isize entity_count = c->info.entities.count;
@@ -1799,7 +1787,7 @@ void generate_minimum_dependency_set(Checker *c, Entity *start) {
 		str_lit("bswap_f64"),
 	};
 	for (isize i = 0; i < gb_count_of(required_runtime_entities); i++) {
-		add_dependency_to_set(c, scope_lookup(c->info.runtime_package->scope, required_runtime_entities[i]));
+		force_add_dependency_entity(c, c->info.runtime_package->scope, required_runtime_entities[i]);
 	}
 
 	if (build_context.no_crt) {
@@ -1811,7 +1799,7 @@ void generate_minimum_dependency_set(Checker *c, Entity *start) {
 			str_lit("_fltused"),
 		};
 		for (isize i = 0; i < gb_count_of(required_no_crt_entities); i++) {
-			add_dependency_to_set(c, scope_lookup(c->info.runtime_package->scope, required_no_crt_entities[i]));
+			force_add_dependency_entity(c, c->info.runtime_package->scope, required_no_crt_entities[i]);
 		}
 	}
 
@@ -1820,7 +1808,7 @@ void generate_minimum_dependency_set(Checker *c, Entity *start) {
 		str_lit("heap_allocator"),
 	};
 	for (isize i = 0; i < gb_count_of(required_os_entities); i++) {
-		add_dependency_to_set(c, scope_lookup(os->scope, required_os_entities[i]));
+		force_add_dependency_entity(c, os->scope, required_os_entities[i]);
 	}
 
 
@@ -1832,7 +1820,7 @@ void generate_minimum_dependency_set(Checker *c, Entity *start) {
 			str_lit("dynamic_array_expr_error"),
 		};
 		for (isize i = 0; i < gb_count_of(bounds_check_entities); i++) {
-			add_dependency_to_set(c, scope_lookup(c->info.runtime_package->scope, bounds_check_entities[i]));
+			force_add_dependency_entity(c, c->info.runtime_package->scope, bounds_check_entities[i]);
 		}
 	}
 
@@ -1920,6 +1908,7 @@ void generate_minimum_dependency_set(Checker *c, Entity *start) {
 			}
 		}
 	} else {
+		start->flags |= EntityFlag_Used;
 		add_dependency_to_set(c, start);
 	}
 }
@@ -2224,9 +2213,7 @@ void init_core_type_info(Checker *c) {
 	t_type_info_union            = find_core_type(c, str_lit("Type_Info_Union"));
 	t_type_info_enum             = find_core_type(c, str_lit("Type_Info_Enum"));
 	t_type_info_map              = find_core_type(c, str_lit("Type_Info_Map"));
-	t_type_info_bit_field        = find_core_type(c, str_lit("Type_Info_Bit_Field"));
 	t_type_info_bit_set          = find_core_type(c, str_lit("Type_Info_Bit_Set"));
-	t_type_info_opaque           = find_core_type(c, str_lit("Type_Info_Opaque"));
 	t_type_info_simd_vector      = find_core_type(c, str_lit("Type_Info_Simd_Vector"));
 	t_type_info_relative_pointer = find_core_type(c, str_lit("Type_Info_Relative_Pointer"));
 	t_type_info_relative_slice   = find_core_type(c, str_lit("Type_Info_Relative_Slice"));
@@ -2252,9 +2239,7 @@ void init_core_type_info(Checker *c) {
 	t_type_info_union_ptr            = alloc_type_pointer(t_type_info_union);
 	t_type_info_enum_ptr             = alloc_type_pointer(t_type_info_enum);
 	t_type_info_map_ptr              = alloc_type_pointer(t_type_info_map);
-	t_type_info_bit_field_ptr        = alloc_type_pointer(t_type_info_bit_field);
 	t_type_info_bit_set_ptr          = alloc_type_pointer(t_type_info_bit_set);
-	t_type_info_opaque_ptr           = alloc_type_pointer(t_type_info_opaque);
 	t_type_info_simd_vector_ptr      = alloc_type_pointer(t_type_info_simd_vector);
 	t_type_info_relative_pointer_ptr = alloc_type_pointer(t_type_info_relative_pointer);
 	t_type_info_relative_slice_ptr   = alloc_type_pointer(t_type_info_relative_slice);
@@ -3419,6 +3404,8 @@ void check_single_global_entity(Checker *c, Entity *e, DeclInfo *d) {
 
 	GB_ASSERT(ctx.pkg != nullptr);
 	GB_ASSERT(e->pkg != nullptr);
+	ctx.decl = d;
+	ctx.scope = d->scope;
 
 	if (!e->pkg->used) {
 		return;
@@ -3437,8 +3424,6 @@ void check_single_global_entity(Checker *c, Entity *e, DeclInfo *d) {
 		}
 	}
 
-	ctx.decl = d;
-	ctx.scope = d->scope;
 	check_entity_decl(&ctx, e, d, nullptr);
 }
 
@@ -4386,6 +4371,9 @@ void check_proc_info(Checker *c, ProcInfo pi) {
 	}
 
 	check_proc_body(&ctx, pi.token, pi.decl, pi.type, pi.body);
+	if (pi.body != nullptr && pi.decl->entity != nullptr) {
+		pi.decl->entity->flags |= EntityFlag_ProcBodyChecked;
+	}
 }
 
 GB_THREAD_PROC(check_proc_info_worker_proc) {
@@ -4396,6 +4384,38 @@ GB_THREAD_PROC(check_proc_info_worker_proc) {
 	return 0;
 }
 
+void check_unchecked_bodies(Checker *c) {
+	// NOTE(2021-02-26, bill): Sanity checker
+	// This is a partial hack to make sure all procedure bodies have been checked
+	// even ones which should not exist, due to the multithreaded nature of the parser
+	// HACK TODO(2021-02-26, bill): Actually fix this race condition
+	for_array(i, c->info.minimum_dependency_set.entries) {
+		Entity *e = c->info.minimum_dependency_set.entries[i].ptr;
+		if (e == nullptr || e->kind != Entity_Procedure) {
+			continue;
+		}
+		if (e->Procedure.is_foreign) {
+			continue;
+		}
+		if ((e->flags & EntityFlag_ProcBodyChecked) == 0) {
+			GB_ASSERT(e->decl_info != nullptr);
+
+			ProcInfo pi = {};
+			pi.file  = e->file;
+			pi.token = e->token;
+			pi.decl  = e->decl_info;
+			pi.type  = e->type;
+
+			Ast *pl = e->decl_info->proc_lit;
+			GB_ASSERT(pl != nullptr);
+			pi.body  = pl->ProcLit.body;
+			pi.tags  = pl->ProcLit.tags;
+			GB_ASSERT(pi.body != nullptr);
+
+			check_proc_info(c, pi);
+		}
+	}
+}
 
 void check_parsed_files(Checker *c) {
 #define TIME_SECTION(str) do { if (build_context.show_more_timings) timings_start_section(&global_timings, str_lit(str)); } while (0)
@@ -4438,6 +4458,8 @@ void check_parsed_files(Checker *c) {
 			add_curr_ast_file(&ctx, f);
 			check_collect_entities(&ctx, f->decls);
 		}
+
+		pkg->used = true;
 	}
 
 	TIME_SECTION("import entities");
@@ -4451,6 +4473,7 @@ void check_parsed_files(Checker *c) {
 
 	CheckerContext prev_context = c->init_ctx;
 	defer (c->init_ctx = prev_context);
+	c->init_ctx.decl = make_decl_info(nullptr, nullptr);
 
 	TIME_SECTION("check procedure bodies");
 	// NOTE(bill): Nested procedures bodies will be added to this "queue"
@@ -4472,6 +4495,8 @@ void check_parsed_files(Checker *c) {
 	// Calculate initialization order of global variables
 	calculate_global_init_order(c);
 
+	TIME_SECTION("check bodies have all been checked");
+	check_unchecked_bodies(c);
 
 	TIME_SECTION("add untyped expression values");
 	// Add untyped expression values
@@ -4512,6 +4537,7 @@ void check_parsed_files(Checker *c) {
 			if (align > 0 && ptr_set_exists(&c->info.minimum_dependency_set, e)) {
 				add_type_info_type(&c->init_ctx, e->type);
 			}
+
 		} else if (e->kind == Entity_Procedure) {
 			DeclInfo *decl = e->decl_info;
 			ast_node(pl, ProcLit, decl->proc_lit);

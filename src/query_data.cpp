@@ -597,7 +597,6 @@ void generate_and_print_query_data_global_definitions(Checker *c, Timings *timin
 					Type *bt = base_type(t);
 					switch (bt->kind) {
 					case Type_Pointer:      type_kind = str_lit("pointer");       break;
-					case Type_Opaque:       type_kind = str_lit("opaque");        break;
 					case Type_Array:        type_kind = str_lit("array");         break;
 					case Type_Slice:        type_kind = str_lit("slice");         break;
 					case Type_DynamicArray: type_kind = str_lit("dynamic array"); break;
@@ -606,13 +605,11 @@ void generate_and_print_query_data_global_definitions(Checker *c, Timings *timin
 					case Type_Union:        type_kind = str_lit("union");         break;
 					case Type_Enum:         type_kind = str_lit("enum");          break;
 					case Type_Proc:         type_kind = str_lit("procedure");     break;
-					case Type_BitField:     type_kind = str_lit("bit field");     break;
 					case Type_BitSet:       type_kind = str_lit("bit set");       break;
 					case Type_SimdVector:   type_kind = str_lit("simd vector");   break;
 
 					case Type_Generic:
 					case Type_Tuple:
-					case Type_BitFieldValue:
 						GB_PANIC("Invalid definition type");
 						break;
 					}
