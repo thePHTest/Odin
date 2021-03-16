@@ -196,6 +196,7 @@ struct BuildContext {
 	bool   keep_object_files;
 	bool   disallow_do;
 	bool   insert_semicolon;
+	bool   strict_style;
 
 	bool   ignore_warnings;
 	bool   warnings_as_errors;
@@ -364,8 +365,8 @@ bool is_excluded_target_filename(String name) {
 		return true;
 	}
 
-	String test_suffix = str_lit("_test");
 	if (build_context.command_kind != Command_test) {
+		String test_suffix = str_lit("_test");
 		if (string_ends_with(name, test_suffix) && name != test_suffix) {
 			// Ignore *_test.odin files
 			return true;

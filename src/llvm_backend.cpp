@@ -185,9 +185,9 @@ void lb_emit_bounds_check(lbProcedure *p, Token token, lbValue index, lbValue le
 	index = lb_emit_conv(p, index, t_int);
 	len = lb_emit_conv(p, len, t_int);
 
-	lbValue file = lb_find_or_add_entity_string(p->module, token.pos.file);
-	lbValue line = lb_const_int(p->module, t_int, token.pos.line);
-	lbValue column = lb_const_int(p->module, t_int, token.pos.column);
+	lbValue file = lb_find_or_add_entity_string(p->module, get_file_path_string(token.pos.file_id));
+	lbValue line = lb_const_int(p->module, t_i32, token.pos.line);
+	lbValue column = lb_const_int(p->module, t_i32, token.pos.column);
 
 	auto args = array_make<lbValue>(permanent_allocator(), 5);
 	args[0] = file;
@@ -207,9 +207,9 @@ void lb_emit_slice_bounds_check(lbProcedure *p, Token token, lbValue low, lbValu
 		return;
 	}
 
-	lbValue file = lb_find_or_add_entity_string(p->module, token.pos.file);
-	lbValue line = lb_const_int(p->module, t_int, token.pos.line);
-	lbValue column = lb_const_int(p->module, t_int, token.pos.column);
+	lbValue file = lb_find_or_add_entity_string(p->module, get_file_path_string(token.pos.file_id));
+	lbValue line = lb_const_int(p->module, t_i32, token.pos.line);
+	lbValue column = lb_const_int(p->module, t_i32, token.pos.column);
 	high = lb_emit_conv(p, high, t_int);
 
 	if (!lower_value_used) {
@@ -2545,17 +2545,7 @@ void lb_begin_procedure_body(lbProcedure *p) {
 		}
 	}
 	if (p->type->Proc.calling_convention == ProcCC_Odin) {
-		Entity *e = alloc_entity_param(nullptr, make_token_ident(str_lit("__.context_ptr")), t_context_ptr, false, false);
-		e->flags |= EntityFlag_NoAlias;
-		lbValue param = {};
-		param.value = LLVMGetParam(p->value, LLVMCountParams(p->value)-1);
-		param.type = e->type;
-		lb_add_entity(p->module, e, param);
-		lbAddr ctx_addr = {};
-		ctx_addr.kind = lbAddr_Context;
-		ctx_addr.addr = param;
-		lbContextData ctx = {ctx_addr, p->scope_index};
-		array_add(&p->context_stack, ctx);
+		lb_push_context_onto_stack_from_implicit_parameter(p);
 	}
 
 	lb_start_block(p, p->entry_block);
@@ -4844,7 +4834,7 @@ lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, bool allow_loc
 			return *found;
 		}
 
-		GB_PANIC("Error in: %.*s(%td:%td), missing procedure %.*s\n", LIT(e->token.pos.file), e->token.pos.line, e->token.pos.column, LIT(e->token.string));
+		GB_PANIC("Error in: %s, missing procedure %.*s\n", token_pos_to_string(e->token.pos), LIT(e->token.string));
 	}
 
 	bool is_local = allow_local && m->curr_procedure != nullptr;
@@ -5414,9 +5404,9 @@ lbValue lb_emit_source_code_location(lbProcedure *p, String const &procedure, To
 	lbModule *m = p->module;
 
 	LLVMValueRef fields[4] = {};
-	fields[0]/*file*/      = lb_find_or_add_entity_string(p->module, pos.file).value;
-	fields[1]/*line*/      = lb_const_int(m, t_int, pos.line).value;
-	fields[2]/*column*/    = lb_const_int(m, t_int, pos.column).value;
+	fields[0]/*file*/      = lb_find_or_add_entity_string(p->module, get_file_path_string(pos.file_id)).value;
+	fields[1]/*line*/      = lb_const_int(m, t_i32, pos.line).value;
+	fields[2]/*column*/    = lb_const_int(m, t_i32, pos.column).value;
 	fields[3]/*procedure*/ = lb_find_or_add_entity_string(p->module, procedure).value;
 
 	lbValue res = {};
@@ -6641,10 +6631,35 @@ void lb_emit_init_context(lbProcedure *p, lbAddr addr) {
 	lb_emit_runtime_call(p, "__init_context", args);
 }
 
-void lb_push_context_onto_stack(lbProcedure *p, lbAddr ctx) {
+lbContextData *lb_push_context_onto_stack_from_implicit_parameter(lbProcedure *p) {
+	Type *pt = base_type(p->type);
+	GB_ASSERT(pt->kind == Type_Proc);
+	GB_ASSERT(pt->Proc.calling_convention == ProcCC_Odin);
+
+	Entity *e = alloc_entity_param(nullptr, make_token_ident(str_lit("__.context_ptr")), t_context_ptr, false, false);
+	e->flags |= EntityFlag_NoAlias;
+
+	LLVMValueRef context_ptr = LLVMGetParam(p->value, LLVMCountParams(p->value)-1);
+	context_ptr = LLVMBuildPointerCast(p->builder, context_ptr, lb_type(p->module, e->type), "");
+
+	lbValue param = {context_ptr, e->type};
+	lb_add_entity(p->module, e, param);
+	lbAddr ctx_addr = {};
+	ctx_addr.kind = lbAddr_Context;
+	ctx_addr.addr = param;
+
+	lbContextData *cd = array_add_and_get(&p->context_stack);
+	cd->ctx = ctx_addr;
+	cd->scope_index = -1;
+	return cd;
+}
+
+lbContextData *lb_push_context_onto_stack(lbProcedure *p, lbAddr ctx) {
 	ctx.kind = lbAddr_Context;
-	lbContextData cd = {ctx, p->scope_index};
-	array_add(&p->context_stack, cd);
+	lbContextData *cd = array_add_and_get(&p->context_stack);
+	cd->ctx = ctx;
+	cd->scope_index = p->scope_index;
+	return cd;
 }
 
 
@@ -6655,13 +6670,13 @@ lbAddr lb_find_or_generate_context_ptr(lbProcedure *p) {
 
 	Type *pt = base_type(p->type);
 	GB_ASSERT(pt->kind == Type_Proc);
-	{
-		lbAddr c = lb_add_local_generated(p, t_context, false);
-		c.kind = lbAddr_Context;
-		lb_emit_init_context(p, c);
-		lb_push_context_onto_stack(p, c);
-		return c;
-	}
+	GB_ASSERT(pt->Proc.calling_convention != ProcCC_Odin);
+
+	lbAddr c = lb_add_local_generated(p, t_context, true);
+	c.kind = lbAddr_Context;
+	lb_emit_init_context(p, c);
+	lb_push_context_onto_stack(p, c);
+	return c;
 }
 
 lbValue lb_address_from_load_or_generate_local(lbProcedure *p, lbValue value) {
@@ -6985,7 +7000,7 @@ lbValue lb_emit_deep_field_ev(lbProcedure *p, lbValue e, Selection sel) {
 
 
 
-void lb_build_defer_stmt(lbProcedure *p, lbDefer d) {
+void lb_build_defer_stmt(lbProcedure *p, lbDefer const &d) {
 	// NOTE(bill): The prev block may defer injection before it's terminator
 	LLVMValueRef last_instr = LLVMGetLastInstruction(p->curr_block->block);
 	if (last_instr != nullptr && LLVMIsAReturnInst(last_instr)) {
@@ -6994,9 +7009,9 @@ void lb_build_defer_stmt(lbProcedure *p, lbDefer d) {
 	}
 
 	isize prev_context_stack_count = p->context_stack.count;
+	GB_ASSERT(prev_context_stack_count <= p->context_stack.capacity);
 	defer (p->context_stack.count = prev_context_stack_count);
 	p->context_stack.count = d.context_stack_count;
-
 
 	lbBlock *b = lb_create_block(p, "defer");
 	if (last_instr == nullptr || !LLVMIsATerminatorInst(last_instr)) {
@@ -7019,11 +7034,7 @@ void lb_emit_defer_stmts(lbProcedure *p, lbDeferExitKind kind, lbBlock *block) {
 	isize count = p->defer_stmts.count;
 	isize i = count;
 	while (i --> 0) {
-		lbDefer d = p->defer_stmts[i];
-
-		isize prev_context_stack_count = p->context_stack.count;
-		defer (p->context_stack.count = prev_context_stack_count);
-		p->context_stack.count = d.context_stack_count;
+		lbDefer const &d = p->defer_stmts[i];
 
 		if (kind == lbDeferExit_Default) {
 			if (p->scope_index == d.scope_index &&
@@ -7046,24 +7057,35 @@ void lb_emit_defer_stmts(lbProcedure *p, lbDeferExitKind kind, lbBlock *block) {
 	}
 }
 
-lbDefer lb_add_defer_node(lbProcedure *p, isize scope_index, Ast *stmt) {
-	lbDefer d = {lbDefer_Node};
-	d.scope_index = scope_index;
-	d.context_stack_count = p->context_stack.count;
-	d.block = p->curr_block;
-	d.stmt = stmt;
-	array_add(&p->defer_stmts, d);
-	return d;
+void lb_add_defer_node(lbProcedure *p, isize scope_index, Ast *stmt) {
+	Type *pt = base_type(p->type);
+	GB_ASSERT(pt->kind == Type_Proc);
+	if (pt->Proc.calling_convention == ProcCC_Odin) {
+		GB_ASSERT(p->context_stack.count != 0);
+	}
+
+	lbDefer *d = array_add_and_get(&p->defer_stmts);
+	d->kind = lbDefer_Node;
+	d->scope_index = scope_index;
+	d->context_stack_count = p->context_stack.count;
+	d->block = p->curr_block;
+	d->stmt = stmt;
 }
 
-lbDefer lb_add_defer_proc(lbProcedure *p, isize scope_index, lbValue deferred, Array<lbValue> const &result_as_args) {
-	lbDefer d = {lbDefer_Proc};
-	d.scope_index = p->scope_index;
-	d.block = p->curr_block;
-	d.proc.deferred = deferred;
-	d.proc.result_as_args = result_as_args;
-	array_add(&p->defer_stmts, d);
-	return d;
+void lb_add_defer_proc(lbProcedure *p, isize scope_index, lbValue deferred, Array<lbValue> const &result_as_args) {
+	Type *pt = base_type(p->type);
+	GB_ASSERT(pt->kind == Type_Proc);
+	if (pt->Proc.calling_convention == ProcCC_Odin) {
+		GB_ASSERT(p->context_stack.count != 0);
+	}
+
+	lbDefer *d = array_add_and_get(&p->defer_stmts);
+	d->kind = lbDefer_Proc;
+	d->scope_index = p->scope_index;
+	d->block = p->curr_block;
+	d->context_stack_count = p->context_stack.count;
+	d->proc.deferred = deferred;
+	d->proc.result_as_args = result_as_args;
 }
 
 
@@ -7990,6 +8012,7 @@ lbValue lb_build_builtin_proc(lbProcedure *p, Ast *expr, TypeAndValue const &tv,
 		LLVMBuildFence(p->builder, LLVMAtomicOrderingAcquireRelease, false, "");
 		return {};
 
+	case BuiltinProc_volatile_store:
 	case BuiltinProc_atomic_store:
 	case BuiltinProc_atomic_store_rel:
 	case BuiltinProc_atomic_store_relaxed:
@@ -8000,6 +8023,7 @@ lbValue lb_build_builtin_proc(lbProcedure *p, Ast *expr, TypeAndValue const &tv,
 
 		LLVMValueRef instr = LLVMBuildStore(p->builder, val.value, dst.value);
 		switch (id) {
+		case BuiltinProc_volatile_store:         LLVMSetVolatile(instr, true);                                     break;
 		case BuiltinProc_atomic_store:           LLVMSetOrdering(instr, LLVMAtomicOrderingSequentiallyConsistent); break;
 		case BuiltinProc_atomic_store_rel:       LLVMSetOrdering(instr, LLVMAtomicOrderingRelease);                break;
 		case BuiltinProc_atomic_store_relaxed:   LLVMSetOrdering(instr, LLVMAtomicOrderingMonotonic);              break;
@@ -8011,6 +8035,7 @@ lbValue lb_build_builtin_proc(lbProcedure *p, Ast *expr, TypeAndValue const &tv,
 		return {};
 	}
 
+	case BuiltinProc_volatile_load:
 	case BuiltinProc_atomic_load:
 	case BuiltinProc_atomic_load_acq:
 	case BuiltinProc_atomic_load_relaxed:
@@ -8019,6 +8044,7 @@ lbValue lb_build_builtin_proc(lbProcedure *p, Ast *expr, TypeAndValue const &tv,
 
 		LLVMValueRef instr = LLVMBuildLoad(p->builder, dst.value, "");
 		switch (id) {
+		case BuiltinProc_volatile_load:         LLVMSetVolatile(instr, true);                                     break;
 		case BuiltinProc_atomic_load:           LLVMSetOrdering(instr, LLVMAtomicOrderingSequentiallyConsistent); break;
 		case BuiltinProc_atomic_load_acq:       LLVMSetOrdering(instr, LLVMAtomicOrderingAcquire);                break;
 		case BuiltinProc_atomic_load_relaxed:   LLVMSetOrdering(instr, LLVMAtomicOrderingMonotonic);              break;
@@ -9509,9 +9535,9 @@ lbValue lb_emit_union_cast(lbProcedure *p, lbValue value, Type *type, TokenPos p
 			auto args = array_make<lbValue>(permanent_allocator(), 7);
 			args[0] = ok;
 
-			args[1] = lb_const_string(m, pos.file);
-			args[2] = lb_const_int(m, t_int, pos.line);
-			args[3] = lb_const_int(m, t_int, pos.column);
+			args[1] = lb_const_string(m, get_file_path_string(pos.file_id));
+			args[2] = lb_const_int(m, t_i32, pos.line);
+			args[3] = lb_const_int(m, t_i32, pos.column);
 
 			args[4] = lb_typeid(m, src_type);
 			args[5] = lb_typeid(m, dst_type);
@@ -9571,9 +9597,9 @@ lbAddr lb_emit_any_cast_addr(lbProcedure *p, lbValue value, Type *type, TokenPos
 		auto args = array_make<lbValue>(permanent_allocator(), 7);
 		args[0] = ok;
 
-		args[1] = lb_const_string(m, pos.file);
-		args[2] = lb_const_int(m, t_int, pos.line);
-		args[3] = lb_const_int(m, t_int, pos.column);
+		args[1] = lb_const_string(m, get_file_path_string(pos.file_id));
+		args[2] = lb_const_int(m, t_i32, pos.line);
+		args[3] = lb_const_int(m, t_i32, pos.column);
 
 		args[4] = any_typeid;
 		args[5] = dst_typeid;
@@ -9614,7 +9640,7 @@ lbValue lb_build_expr(lbProcedure *p, Ast *expr) {
 
 	TokenPos expr_pos = ast_token(expr).pos;
 	TypeAndValue tv = type_and_value_of_expr(expr);
-	GB_ASSERT_MSG(tv.mode != Addressing_Invalid, "invalid expression '%s' (tv.mode = %d, tv.type = %s) @ %.*s(%td:%td)\n Current Proc: %.*s : %s", expr_to_string(expr), tv.mode, type_to_string(tv.type), LIT(expr_pos.file), expr_pos.line, expr_pos.column, LIT(p->name), type_to_string(p->type));
+	GB_ASSERT_MSG(tv.mode != Addressing_Invalid, "invalid expression '%s' (tv.mode = %d, tv.type = %s) @ %s\n Current Proc: %.*s : %s", expr_to_string(expr), tv.mode, type_to_string(tv.type), token_pos_to_string(expr_pos), LIT(p->name), type_to_string(p->type));
 
 	if (tv.value.kind != ExactValue_Invalid) {
 		// NOTE(bill): Short on constant values
@@ -9626,12 +9652,12 @@ lbValue lb_build_expr(lbProcedure *p, Ast *expr) {
 	switch (expr->kind) {
 	case_ast_node(bl, BasicLit, expr);
 		TokenPos pos = bl->token.pos;
-		GB_PANIC("Non-constant basic literal %.*s(%td:%td) - %.*s", LIT(pos.file), pos.line, pos.column, LIT(token_strings[bl->token.kind]));
+		GB_PANIC("Non-constant basic literal %s - %.*s", token_pos_to_string(pos), LIT(token_strings[bl->token.kind]));
 	case_end;
 
 	case_ast_node(bd, BasicDirective, expr);
 		TokenPos pos = bd->token.pos;
-		GB_PANIC("Non-constant basic literal %.*s(%td:%td) - %.*s", LIT(pos.file), pos.line, pos.column, LIT(bd->name));
+		GB_PANIC("Non-constant basic literal %s - %.*s", token_pos_to_string(pos), LIT(bd->name));
 	case_end;
 
 	case_ast_node(i, Implicit, expr);
@@ -9658,8 +9684,8 @@ lbValue lb_build_expr(lbProcedure *p, Ast *expr) {
 		if (e->kind == Entity_Builtin) {
 			Token token = ast_token(expr);
 			GB_PANIC("TODO(bill): lb_build_expr Entity_Builtin '%.*s'\n"
-			         "\t at %.*s(%td:%td)", LIT(builtin_procs[e->Builtin.id].name),
-			         LIT(token.pos.file), token.pos.line, token.pos.column);
+			         "\t at %s", LIT(builtin_procs[e->Builtin.id].name),
+			         token_pos_to_string(token.pos));
 			return {};
 		} else if (e->kind == Entity_Nil) {
 			lbValue res = {};
@@ -9680,7 +9706,7 @@ lbValue lb_build_expr(lbProcedure *p, Ast *expr) {
 		} else if (e != nullptr && e->kind == Entity_Variable) {
 			return lb_addr_load(p, lb_build_addr(p, expr));
 		}
-		gb_printf_err("Error in: %.*s(%td:%td)\n", LIT(p->name), i->token.pos.line, i->token.pos.column);
+		gb_printf_err("Error in: %s\n", token_pos_to_string(i->token.pos));
 		String pkg = {};
 		if (e->pkg) {
 			pkg = e->pkg->name;
@@ -9877,9 +9903,9 @@ lbValue lb_build_expr(lbProcedure *p, Ast *expr) {
 					auto args = array_make<lbValue>(permanent_allocator(), 6);
 					args[0] = ok;
 
-					args[1] = lb_find_or_add_entity_string(p->module, pos.file);
-					args[2] = lb_const_int(p->module, t_int, pos.line);
-					args[3] = lb_const_int(p->module, t_int, pos.column);
+					args[1] = lb_find_or_add_entity_string(p->module, get_file_path_string(pos.file_id));
+					args[2] = lb_const_int(p->module, t_i32, pos.line);
+					args[3] = lb_const_int(p->module, t_i32, pos.column);
 
 					args[4] = lb_typeid(p->module, src_type);
 					args[5] = lb_typeid(p->module, dst_type);
@@ -9902,9 +9928,9 @@ lbValue lb_build_expr(lbProcedure *p, Ast *expr) {
 					auto args = array_make<lbValue>(permanent_allocator(), 6);
 					args[0] = ok;
 
-					args[1] = lb_find_or_add_entity_string(p->module, pos.file);
-					args[2] = lb_const_int(p->module, t_int, pos.line);
-					args[3] = lb_const_int(p->module, t_int, pos.column);
+					args[1] = lb_find_or_add_entity_string(p->module, get_file_path_string(pos.file_id));
+					args[2] = lb_const_int(p->module, t_i32, pos.line);
+					args[3] = lb_const_int(p->module, t_i32, pos.column);
 
 					args[4] = any_id;
 					args[5] = id;
@@ -11345,9 +11371,9 @@ lbAddr lb_build_addr(lbProcedure *p, Ast *expr) {
 	TokenPos token_pos = ast_token(expr).pos;
 	GB_PANIC("Unexpected address expression\n"
 	         "\tAst: %.*s @ "
-	         "%.*s(%td:%td)\n",
+	         "%s\n",
 	         LIT(ast_strings[expr->kind]),
-	         LIT(token_pos.file), token_pos.line, token_pos.column);
+	         token_pos_to_string(token_pos));
 
 
 	return {};
@@ -11467,6 +11493,13 @@ lbValue lb_find_runtime_value(lbModule *m, String const &name) {
 	Entity *e = scope_lookup_current(p->scope, name);
 	lbValue *found = map_get(&m->values, hash_entity(e));
 	GB_ASSERT_MSG(found != nullptr, "Unable to find runtime value '%.*s'", LIT(name));
+	lbValue value = *found;
+	return value;
+}
+lbValue lb_find_package_value(lbModule *m, String const &pkg, String const &name) {
+	Entity *e = find_entity_in_pkg(m->info, pkg, name);
+	lbValue *found = map_get(&m->values, hash_entity(e));
+	GB_ASSERT_MSG(found != nullptr, "Unable to find value '%.*s.%.*s'", LIT(pkg), LIT(name));
 	lbValue value = *found;
 	return value;
 }
@@ -12859,12 +12892,58 @@ void lb_generate_code(lbGenerator *gen) {
 		LLVMBuildCall2(p->builder, LLVMGetElementType(lb_type(m, startup_runtime->type)), startup_runtime->value, nullptr, 0, "");
 
 		if (build_context.command_kind == Command_test) {
+			Type *t_Internal_Test = find_type_in_pkg(m->info, str_lit("testing"), str_lit("Internal_Test"));
+			Type *array_type = alloc_type_array(t_Internal_Test, m->info->testing_procedures.count);
+			Type *slice_type = alloc_type_slice(t_Internal_Test);
+			lbAddr all_tests_array_addr = lb_add_global_generated(p->module, array_type, {});
+			lbValue all_tests_array = lb_addr_get_ptr(p, all_tests_array_addr);
+
+			LLVMTypeRef lbt_Internal_Test = lb_type(m, t_Internal_Test);
+
+			LLVMValueRef indices[2] = {};
+			indices[0] = LLVMConstInt(lb_type(m, t_i32), 0, false);
+
 			for_array(i, m->info->testing_procedures) {
-				Entity *e = m->info->testing_procedures[i];
-				lbValue *found = map_get(&m->values, hash_entity(e));
+				Entity *testing_proc = m->info->testing_procedures[i];
+				String name = testing_proc->token.string;
+				lbValue *found = map_get(&m->values, hash_entity(testing_proc));
 				GB_ASSERT(found != nullptr);
-				lb_emit_call(p, *found, {});
+
+				String pkg_name = {};
+				if (testing_proc->pkg != nullptr) {
+					pkg_name = testing_proc->pkg->name;
+				}
+				lbValue v_pkg  = lb_find_or_add_entity_string(m, pkg_name);
+				lbValue v_name = lb_find_or_add_entity_string(m, name);
+				lbValue v_proc = *found;
+
+				indices[1] = LLVMConstInt(lb_type(m, t_int), i, false);
+
+				LLVMValueRef vals[3] = {};
+				vals[0] = v_pkg.value;
+				vals[1] = v_name.value;
+				vals[2] = v_proc.value;
+				GB_ASSERT(LLVMIsConstant(vals[0]));
+				GB_ASSERT(LLVMIsConstant(vals[1]));
+				GB_ASSERT(LLVMIsConstant(vals[2]));
+
+				LLVMValueRef dst = LLVMConstInBoundsGEP(all_tests_array.value, indices, gb_count_of(indices));
+				LLVMValueRef src = LLVMConstNamedStruct(lbt_Internal_Test, vals, gb_count_of(vals));
+
+				LLVMBuildStore(p->builder, src, dst);
 			}
+
+			lbAddr all_tests_slice = lb_add_local_generated(p, slice_type, true);
+			lb_fill_slice(p, all_tests_slice,
+			              lb_array_elem(p, all_tests_array),
+			              lb_const_int(m, t_int, m->info->testing_procedures.count));
+
+
+			lbValue runner = lb_find_package_value(m, str_lit("testing"), str_lit("runner"));
+
+			auto args = array_make<lbValue>(heap_allocator(), 1);
+			args[0] = lb_addr_load(p, all_tests_slice);
+			lb_emit_call(p, runner, args);
 		} else {
 			lbValue *found = map_get(&m->values, hash_entity(entry_point));
 			GB_ASSERT(found != nullptr);

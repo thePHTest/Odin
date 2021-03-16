@@ -507,7 +507,7 @@ bool check_vet_shadowing(Checker *c, Entity *e, VettedEntity *ve) {
 	}
 
 	// NOTE(bill): The entities must be in the same file
-	if (e->token.pos.file != shadowed->token.pos.file) {
+	if (e->token.pos.file_id != shadowed->token.pos.file_id) {
 		return false;
 	}
 	// NOTE(bill): The shaded identifier must appear before this one to be an
@@ -1127,15 +1127,15 @@ bool redeclaration_error(String name, Entity *prev, Entity *found) {
 		if (found->flags & EntityFlag_Result) {
 			error(prev->token,
 			      "Direct shadowing of the named return value '%.*s' in this scope through 'using'\n"
-			      "\tat %.*s(%td:%td)",
+			      "\tat %s",
 			      LIT(name),
-			      LIT(up->token.pos.file), up->token.pos.line, up->token.pos.column);
+			      token_pos_to_string(up->token.pos));
 		} else {
 			error(prev->token,
 			      "Redeclaration of '%.*s' in this scope through 'using'\n"
-			      "\tat %.*s(%td:%td)",
+			      "\tat %s",
 			      LIT(name),
-			      LIT(up->token.pos.file), up->token.pos.line, up->token.pos.column);
+			      token_pos_to_string(up->token.pos));
 		}
 	} else {
 		if (pos == prev->token.pos) {
@@ -1145,15 +1145,15 @@ bool redeclaration_error(String name, Entity *prev, Entity *found) {
 		if (found->flags & EntityFlag_Result) {
 			error(prev->token,
 			      "Direct shadowing of the named return value '%.*s' in this scope\n"
-			      "\tat %.*s(%td:%td)",
+			      "\tat %s",
 			      LIT(name),
-			      LIT(pos.file), pos.line, pos.column);
+			      token_pos_to_string(pos));
 		} else {
 			error(prev->token,
 			      "Redeclaration of '%.*s' in this scope\n"
-			      "\tat %.*s(%td:%td)",
+			      "\tat %s",
 			      LIT(name),
-			      LIT(pos.file), pos.line, pos.column);
+			      token_pos_to_string(pos));
 		}
 	}
 	return false;
@@ -1865,6 +1865,20 @@ void generate_minimum_dependency_set(Checker *c, Entity *start) {
 	}
 
 	if (build_context.command_kind == Command_test) {
+		AstPackage *testing_package = get_core_package(&c->info, str_lit("testing"));
+		Scope *testing_scope = testing_package->scope;
+
+		// Add all of testing library as a dependency
+		for_array(i, testing_scope->elements.entries) {
+			Entity *e = testing_scope->elements.entries[i].value;
+			if (e != nullptr) {
+				e->flags |= EntityFlag_Used;
+				add_dependency_to_set(c, e);
+			}
+		}
+
+		Entity *test_signature = scope_lookup_current(testing_scope, str_lit("Test_Signature"));
+
 		AstPackage *pkg = c->info.init_package;
 		Scope *s = pkg->scope;
 		for_array(i, s->elements.entries) {
@@ -1877,27 +1891,21 @@ void generate_minimum_dependency_set(Checker *c, Entity *start) {
 				continue;
 			}
 
-			String name = e->token.string;
-			String prefix = str_lit("test_");
-
-			if (!string_starts_with(name, prefix)) {
+			if ((e->flags & EntityFlag_Test) == 0) {
 				continue;
 			}
 
-			bool is_tester = false;
-			if (name != prefix) {
-				is_tester = true;
-			} else {
-				error(e->token, "Invalid testing procedure name: %.*s", LIT(name));
-			}
+			String name = e->token.string;
+
+			bool is_tester = true;
 
 			Type *t = base_type(e->type);
 			GB_ASSERT(t->kind == Type_Proc);
-			if (t->Proc.param_count == 0 && t->Proc.result_count == 0) {
+			if (are_types_identical(t, base_type(test_signature->type))) {
 				// Good
 			} else {
 				gbString str = type_to_string(t);
-				error(e->token, "Testing procedures must have a signature type of proc(), got %s", str);
+				error(e->token, "Testing procedures must have a signature type of proc(^testing.T), got %s", str);
 				gb_string_free(str);
 				is_tester = false;
 			}
@@ -1907,7 +1915,7 @@ void generate_minimum_dependency_set(Checker *c, Entity *start) {
 				array_add(&c->info.testing_procedures, e);
 			}
 		}
-	} else {
+	} else if (start != nullptr) {
 		start->flags |= EntityFlag_Used;
 		add_dependency_to_set(c, start);
 	}
@@ -2098,6 +2106,28 @@ Type *find_core_type(Checker *c, String name) {
 	}
 	if (e->type == nullptr) {
 		check_single_global_entity(c, e, e->decl_info);
+	}
+	GB_ASSERT(e->type != nullptr);
+	return e->type;
+}
+
+
+Entity *find_entity_in_pkg(CheckerInfo *info, String const &pkg, String const &name) {
+	AstPackage *package = get_core_package(info, pkg);
+	Entity *e = scope_lookup_current(package->scope, name);
+	if (e == nullptr) {
+		compiler_error("Could not find type declaration for '%.*s.%.*s'\n", LIT(pkg), LIT(name));
+		// NOTE(bill): This will exit the program as it's cannot continue without it!
+	}
+	return e;
+}
+
+Type *find_type_in_pkg(CheckerInfo *info, String const &pkg, String const &name) {
+	AstPackage *package = get_core_package(info, pkg);
+	Entity *e = scope_lookup_current(package->scope, name);
+	if (e == nullptr) {
+		compiler_error("Could not find type declaration for '%.*s.%.*s'\n", LIT(pkg), LIT(name));
+		// NOTE(bill): This will exit the program as it's cannot continue without it!
 	}
 	GB_ASSERT(e->type != nullptr);
 	return e->type;
@@ -2377,7 +2407,13 @@ DECL_ATTRIBUTE_PROC(foreign_block_decl_attribute) {
 }
 
 DECL_ATTRIBUTE_PROC(proc_decl_attribute) {
-	if (name == "export") {
+	if (name == "test") {
+		if (value != nullptr) {
+			error(value, "'%.*s' expects no parameter, or a string literal containing \"file\" or \"package\"", LIT(name));
+		}
+		ac->test = true;
+		return true;
+	} else if (name == "export") {
 		ExactValue ev = check_decl_attribute_value(c, value);
 		if (ev.kind == ExactValue_Invalid) {
 			ac->is_export = true;
@@ -3383,6 +3419,11 @@ void check_collect_entities(CheckerContext *c, Slice<Ast *> const &nodes) {
 	}
 }
 
+CheckerContext *create_checker_context(Checker *c) {
+	CheckerContext *ctx = gb_alloc_item(heap_allocator(), CheckerContext);
+	*ctx = c->init_ctx;
+	return ctx;
+}
 
 void check_single_global_entity(Checker *c, Entity *e, DeclInfo *d) {
 	GB_ASSERT(e != nullptr);
@@ -3395,17 +3436,17 @@ void check_single_global_entity(Checker *c, Entity *e, DeclInfo *d) {
 		return;
 	}
 
-	CheckerContext ctx = c->init_ctx;
+	CheckerContext *ctx = create_checker_context(c);
 
 	GB_ASSERT(d->scope->flags&ScopeFlag_File);
 	AstFile *file = d->scope->file;
-	add_curr_ast_file(&ctx, file);
+	add_curr_ast_file(ctx, file);
 	AstPackage *pkg = file->pkg;
 
-	GB_ASSERT(ctx.pkg != nullptr);
+	GB_ASSERT(ctx->pkg != nullptr);
 	GB_ASSERT(e->pkg != nullptr);
-	ctx.decl = d;
-	ctx.scope = d->scope;
+	ctx->decl = d;
+	ctx->scope = d->scope;
 
 	if (!e->pkg->used) {
 		return;
@@ -3424,7 +3465,7 @@ void check_single_global_entity(Checker *c, Entity *e, DeclInfo *d) {
 		}
 	}
 
-	check_entity_decl(&ctx, e, d, nullptr);
+	check_entity_decl(ctx, e, d, nullptr);
 }
 
 void check_all_global_entities(Checker *c) {
@@ -3524,7 +3565,7 @@ void add_import_dependency_node(Checker *c, Ast *decl, Map<ImportGraphNode *> *M
 				gb_printf_err("%.*s\n", LIT(pkg->fullpath));
 			}
 			Token token = ast_token(decl);
-			gb_printf_err("%.*s(%td:%td)\n", LIT(token.pos.file), token.pos.line, token.pos.column);
+			gb_printf_err("%s\n", token_pos_to_string(token.pos));
 			GB_PANIC("Unable to find package: %.*s", LIT(path));
 		}
 		AstPackage *pkg = *found;
@@ -3699,7 +3740,7 @@ void check_add_import_decl(CheckerContext *ctx, Ast *decl) {
 				AstPackage *pkg = pkgs->entries[pkg_index].value;
 				gb_printf_err("%.*s\n", LIT(pkg->fullpath));
 			}
-			gb_printf_err("%.*s(%td:%td)\n", LIT(token.pos.file), token.pos.line, token.pos.column);
+			gb_printf_err("%s\n", token_pos_to_string(token.pos));
 			GB_PANIC("Unable to find scope for package: %.*s", LIT(id->fullpath));
 		} else {
 			AstPackage *pkg = *found;
@@ -4714,9 +4755,9 @@ void check_parsed_files(Checker *c) {
 		Entity *e = scope_lookup_current(s, str_lit("main"));
 		if (e == nullptr) {
 			Token token = {};
-			token.pos.file   = s->pkg->fullpath;
-			token.pos.line   = 1;
-			token.pos.column = 1;
+			token.pos.file_id = 0;
+			token.pos.line    = 1;
+			token.pos.column  = 1;
 			if (s->pkg->files.count > 0) {
 				AstFile *f = s->pkg->files[0];
 				if (f->tokens.count > 0) {

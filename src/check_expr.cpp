@@ -3955,7 +3955,7 @@ bool check_builtin_procedure(CheckerContext *c, Operand *operand, Ast *call, i32
 			gbAllocator a = heap_allocator();
 
 			GB_ASSERT(o.value.kind == ExactValue_String);
-			String base_dir = dir_from_path(bd->token.pos.file);
+			String base_dir = dir_from_path(get_file_path_string(bd->token.pos.file_id));
 			String original_string = o.value.value_string;
 
 
@@ -5502,6 +5502,9 @@ bool check_builtin_procedure(CheckerContext *c, Operand *operand, Ast *call, i32
 		operand->mode = Addressing_NoValue;
 		break;
 
+
+
+
 	case BuiltinProc_atomic_fence:
 	case BuiltinProc_atomic_fence_acq:
 	case BuiltinProc_atomic_fence_rel:
@@ -5509,6 +5512,8 @@ bool check_builtin_procedure(CheckerContext *c, Operand *operand, Ast *call, i32
 		operand->mode = Addressing_NoValue;
 		break;
 
+	case BuiltinProc_volatile_store:
+		/*fallthrough*/
 	case BuiltinProc_atomic_store:
 	case BuiltinProc_atomic_store_rel:
 	case BuiltinProc_atomic_store_relaxed:
@@ -5527,6 +5532,9 @@ bool check_builtin_procedure(CheckerContext *c, Operand *operand, Ast *call, i32
 			operand->mode = Addressing_NoValue;
 			break;
 		}
+
+	case BuiltinProc_volatile_load:
+		/*fallthrough*/
 	case BuiltinProc_atomic_load:
 	case BuiltinProc_atomic_load_acq:
 	case BuiltinProc_atomic_load_relaxed:
@@ -7239,7 +7247,7 @@ CallArgumentData check_call_arguments(CheckerContext *c, Operand *operand, Type 
 				if (proc->kind == Entity_Variable) {
 					sep = ":=";
 				}
-				error_line("\t%.*s%.*s%.*s %s %s at %.*s(%td:%td)\n", LIT(prefix), LIT(prefix_sep), LIT(name), sep, pt, LIT(pos.file), pos.line, pos.column);
+				error_line("\t%.*s%.*s%.*s %s %s at %s\n", LIT(prefix), LIT(prefix_sep), LIT(name), sep, pt, token_pos_to_string(pos));
 			}
 			if (procs.count > 0) {
 				error_line("\n");
@@ -7300,8 +7308,7 @@ CallArgumentData check_call_arguments(CheckerContext *c, Operand *operand, Type 
 						error_line("\n\t");
 					}
 				}
-				error_line("at %.*s(%td:%td)\n", LIT(pos.file), pos.line, pos.column);
-				// error_line("\t%.*s %s %s at %.*s(%td:%td) %lld\n", LIT(name), sep, pt, LIT(pos.file), pos.line, pos.column, valids[i].score);
+				error_line("at %s\n", token_pos_to_string(pos));
 			}
 			result_type = t_invalid;
 		} else {
@@ -8255,7 +8262,7 @@ ExprKind check_expr_base_internal(CheckerContext *c, Operand *o, Ast *node, Type
 		o->mode = Addressing_Constant;
 		if (bd->name == "file") {
 			o->type = t_untyped_string;
-			o->value = exact_value_string(bd->token.pos.file);
+			o->value = exact_value_string(get_file_path_string(bd->token.pos.file_id));
 		} else if (bd->name == "line") {
 			o->type = t_untyped_integer;
 			o->value = exact_value_i64(bd->token.pos.line);
